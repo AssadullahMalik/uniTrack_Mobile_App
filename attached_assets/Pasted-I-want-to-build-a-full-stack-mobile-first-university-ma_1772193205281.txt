@@ -1,0 +1,276 @@
+I want to build a full-stack mobile-first university management application. The app should solve sessional management problems in my university (Mehran University).
+
+Project Name: UniTrack – University Sessional Management App
+
+Problem Statement
+
+In my university, sessional marks are assigned based on:
+
+Assignments
+
+Sessional Tests
+
+Presentations
+
+Currently:
+
+Assignments are submitted sometimes on MS Teams and sometimes on Google Classroom.
+
+Tests are conducted on different platforms without consistency.
+
+Teachers communicate presentation/test updates through CR (Class Representative).
+
+Many students are unaware of course outlines.
+
+There is no centralized platform for sessional management.
+
+This app should centralize everything into ONE platform.
+
+🎯 App Goals
+
+Build a mobile-first web app (PWA style) that includes:
+
+Student Panel
+
+Teacher Panel
+
+CR Panel
+
+Admin Panel
+
+Use modern stack:
+
+Frontend: React (mobile responsive UI)
+
+Backend: Node.js + Express
+
+Database: MongoDB
+
+Authentication: JWT
+
+File Upload: Cloudinary or local storage
+
+Deployment-ready structure
+
+👥 USER ROLES & FEATURES
+1️⃣ Student Features
+
+Secure Login/Register
+
+View enrolled subjects
+
+View course outline (uploaded by teacher)
+
+Submit assignments (file upload + text description)
+
+View assignment deadlines
+
+Attempt sessional tests (MCQs based)
+
+View test results
+
+View presentation schedule
+
+View sessional marks breakdown:
+
+Assignment marks
+
+Test marks
+
+Presentation marks
+
+Total sessional
+
+Notification system for:
+
+New assignment
+
+New test
+
+Presentation schedule
+
+Marks uploaded
+
+2️⃣ Teacher Features
+
+Login/Register
+
+Create subjects
+
+Upload course outline (PDF)
+
+Create assignments:
+
+Title
+
+Description
+
+Deadline
+
+Total marks
+
+View student submissions
+
+Assign marks & feedback
+
+Create sessional tests:
+
+MCQs
+
+Timer
+
+Auto-grading
+
+Schedule presentations
+
+Upload presentation marks
+
+View overall sessional summary per student
+
+3️⃣ CR (Class Representative) Panel
+
+View announcements from teacher
+
+Post class notifications
+
+View presentation schedules
+
+Manage class reminders
+
+4️⃣ Admin Panel
+
+Approve teachers
+
+Manage departments
+
+Assign subjects
+
+View system analytics
+
+Manage users
+
+🗂 DATABASE STRUCTURE (Design Proper Schemas)
+
+Create MongoDB schemas for:
+
+User (role: student, teacher, cr, admin)
+
+Subject
+
+Assignment
+
+Submission
+
+Test
+
+Question
+
+Result
+
+Presentation
+
+Notification
+
+Marks
+
+Use proper references using ObjectId.
+
+🎨 UI REQUIREMENTS
+
+Mobile-first design
+
+Clean dashboard layout
+
+Sidebar navigation
+
+Modern card-based design
+
+University-themed color scheme
+
+Responsive for mobile devices
+
+Simple and professional UI
+
+🔐 AUTHENTICATION
+
+JWT-based authentication
+
+Role-based authorization middleware
+
+Protected routes
+
+Password hashing using bcrypt
+
+🧠 ADDITIONAL FEATURES
+
+Dashboard with:
+
+Upcoming deadlines
+
+Total assignments pending
+
+Marks summary
+
+Auto calculate sessional percentage
+
+Real-time notifications (optional using Socket.io)
+
+File upload support (PDF, DOCX)
+
+🛠 PROJECT STRUCTURE
+
+Create clean folder structure:
+
+backend/
+
+models/
+
+routes/
+
+controllers/
+
+middleware/
+
+config/
+
+frontend/
+
+components/
+
+pages/
+
+services/
+
+context/
+
+🚀 DELIVERABLES
+
+Full backend code
+
+Full frontend code
+
+API documentation
+
+Setup instructions
+
+Deployment guide
+
+Environment variables example
+
+📌 EXTRA
+
+Make it scalable so it can later be expanded to:
+
+Attendance management
+
+Mid-term & Final exam management
+
+GPA calculation
+
+AI-based performance analysis
+
+Generate the full project step-by-step with explanations.
+
+💡 IMPORTANT
+
+Make the code clean, well-structured, and production-ready.
