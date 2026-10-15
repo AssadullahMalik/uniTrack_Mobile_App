@@ -36,7 +36,7 @@ const env = {
  * the source of truth. Verify these match your Firebase project.
  */
 const FALLBACK = {
-  apiKey: 'AIzaSyBEOh9P4fRTcEjYfZTwP09OfsFcO50m7uM',
+  apiKey: 
   authDomain: 'unitrack-15d9a.firebaseapp.com',
   projectId: 'unitrack-15d9a',
   storageBucket: 'unitrack-15d9a.appspot.com',
