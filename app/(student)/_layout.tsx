@@ -27,7 +27,7 @@ function NativeStudentTabs() {
       <NativeTabs.Trigger name="notifications">
         <Icon sf={{ default: "bell", selected: "bell.fill" }} />
         <Label>Alerts</Label>
-        {unread > 0 && <Badge>{unread}</Badge>}
+        {unread > 0 && <Badge>{String(unread)}</Badge>}
       </NativeTabs.Trigger>
     </NativeTabs>
   );

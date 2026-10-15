@@ -18,7 +18,7 @@ function timeAgo(d: string) {
 }
 
 export default function CRAnnouncements() {
-  const { currentUser, announcements, addAnnouncement, addNotification, subjects, users } = useApp();
+  const { currentUser, announcements, addAnnouncement, addNotification, subjects } = useApp();
   const insets = useSafeAreaInsets();
   const [showCreate, setShowCreate] = useState(false);
   const [title, setTitle] = useState('');
@@ -74,7 +74,7 @@ export default function CRAnnouncements() {
         showsVerticalScrollIndicator={false}
         ListEmptyComponent={() => (
           <Card style={styles.emptyCard}>
-            <Feather name="megaphone" size={40} color={Colors.textMuted} />
+            <Feather name="bell" size={40} color={Colors.textMuted} />
             <Text style={styles.emptyTitle}>No Announcements</Text>
             <Text style={styles.emptyText}>Post your first class announcement</Text>
             <Button label="Post Announcement" onPress={() => setShowCreate(true)} variant="secondary" />
@@ -83,7 +83,7 @@ export default function CRAnnouncements() {
         renderItem={({ item }) => (
           <Card style={styles.annCard}>
             <View style={styles.annHeader}>
-              <View style={styles.crIcon}><Feather name="megaphone" size={16} color={Colors.cr} /></View>
+              <View style={styles.crIcon}><Feather name="bell" size={16} color={Colors.cr} /></View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.annTitle}>{item.title}</Text>
                 <Text style={styles.annMeta}>by {item.crName} · {timeAgo(item.createdAt)}</Text>

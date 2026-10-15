@@ -76,7 +76,7 @@ export default function StudentNotifications() {
           <Card style={styles.emptyCard}>
             <Feather name="bell-off" size={40} color={Colors.textMuted} />
             <Text style={styles.emptyTitle}>No Notifications</Text>
-            <Text style={styles.emptyText}>You're all caught up!</Text>
+            <Text style={styles.emptyText}>You&apos;re all caught up!</Text>
           </Card>
         )}
         renderItem={({ item }) => {

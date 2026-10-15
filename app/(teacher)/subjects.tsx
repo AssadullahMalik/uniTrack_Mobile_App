@@ -1,16 +1,15 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, Pressable, Modal, TextInput, Platform } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { useApp } from '@/context/AppContext';
 import { Colors } from '@/constants/colors';
 import { Card } from '@/components/ui/Card';
-import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import * as Haptics from 'expo-haptics';
+import { subscribeEnrollmentsForTeacher, type Enrollment } from '@/src/services/enrollments';
 
 const DEPARTMENTS = ['Computer Science', 'Electrical Engineering', 'Mechanical Engineering', 'Civil Engineering', 'Software Engineering'];
-const SEMESTERS = ['1', '2', '3', '4', '5', '6', '7', '8'];
 
 export default function TeacherSubjects() {
   const { currentUser, subjects, users, addSubject, getStudentMarks } = useApp();
@@ -19,32 +18,59 @@ export default function TeacherSubjects() {
   const [selectedSubject, setSelectedSubject] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [code, setCode] = useState('');
-  const [department, setDepartment] = useState(DEPARTMENTS[0]);
+  const department = DEPARTMENTS[0];
   const [semester, setSemester] = useState('6');
   const [credits, setCredits] = useState('3');
   const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState('');
   const webTop = Platform.OS === 'web' ? 67 : 0;
 
   const mySubjects = subjects.filter(s => s.teacherId === currentUser?.id);
   const selected = selectedSubject ? subjects.find(s => s.id === selectedSubject) : null;
 
+  const [myEnrollments, setMyEnrollments] = useState<Enrollment[]>([]);
+  const currentUserId = currentUser?.id;
+  useEffect(() => {
+    if (!currentUserId) return;
+    const unsub = subscribeEnrollmentsForTeacher(
+      currentUserId,
+      rows => setMyEnrollments(rows),
+      err => console.error('enrollments teacher snapshot error', err),
+    );
+    return () => unsub();
+  }, [currentUserId]);
+
+  const countBySubjectId = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const e of myEnrollments) {
+      map[e.subjectId] = (map[e.subjectId] ?? 0) + 1;
+    }
+    return map;
+  }, [myEnrollments]);
+
   const handleCreate = async () => {
     if (!currentUser || !name.trim() || !code.trim()) return;
     setCreating(true);
-    await addSubject({
-      name: name.trim(),
-      code: code.trim().toUpperCase(),
-      department,
-      semester,
-      teacherId: currentUser.id,
-      teacherName: currentUser.name,
-      creditHours: parseInt(credits) || 3,
-      enrolledStudents: [],
-    });
-    setCreating(false);
-    setShowCreate(false);
-    setName(''); setCode(''); setCredits('3');
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setCreateError('');
+    try {
+      await addSubject({
+        name: name.trim(),
+        code: code.trim().toUpperCase(),
+        department,
+        semester,
+        teacherId: currentUser.id,
+        teacherName: currentUser.name,
+        creditHours: parseInt(credits) || 3,
+        enrolledStudents: [],
+      });
+      setShowCreate(false);
+      setName(''); setCode(''); setCredits('3');
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (err: any) {
+      setCreateError(err?.message || 'Failed to create subject. Please try again.');
+    } finally {
+      setCreating(false);
+    }
   };
 
   return (
@@ -76,7 +102,7 @@ export default function TeacherSubjects() {
                 <Feather name="chevron-right" size={18} color={Colors.textMuted} />
               </View>
               <View style={styles.metaRow}>
-                <View style={styles.metaItem}><Feather name="users" size={13} color={Colors.textMuted} /><Text style={styles.metaText}>{sub.enrolledStudents.length} students</Text></View>
+                <View style={styles.metaItem}><Feather name="users" size={13} color={Colors.textMuted} /><Text style={styles.metaText}>{countBySubjectId[sub.id] ?? 0} students</Text></View>
                 <View style={styles.metaItem}><Feather name="layers" size={13} color={Colors.textMuted} /><Text style={styles.metaText}>Sem {sub.semester}</Text></View>
                 <View style={styles.metaItem}><Feather name="book" size={13} color={Colors.textMuted} /><Text style={styles.metaText}>{sub.creditHours} credits</Text></View>
               </View>
@@ -102,19 +128,20 @@ export default function TeacherSubjects() {
                 <View style={styles.detailRow}><Feather name="hash" size={14} color={Colors.textSecondary} /><Text style={styles.detailVal}>{selected.code}</Text></View>
                 <View style={styles.detailRow}><Feather name="layers" size={14} color={Colors.textSecondary} /><Text style={styles.detailVal}>Semester {selected.semester} · {selected.department}</Text></View>
                 <View style={styles.detailRow}><Feather name="book" size={14} color={Colors.textSecondary} /><Text style={styles.detailVal}>{selected.creditHours} Credit Hours</Text></View>
-                <View style={styles.detailRow}><Feather name="users" size={14} color={Colors.textSecondary} /><Text style={styles.detailVal}>{selected.enrolledStudents.length} Enrolled Students</Text></View>
+                <View style={styles.detailRow}><Feather name="users" size={14} color={Colors.textSecondary} /><Text style={styles.detailVal}>{countBySubjectId[selected.id] ?? 0} Enrolled Students</Text></View>
               </Card>
 
-              {selected.enrolledStudents.length > 0 && (
+              {(countBySubjectId[selected.id] ?? 0) > 0 && (
                 <>
                   <Text style={[styles.sectionLabel, { marginBottom: 12 }]}>Enrolled Students</Text>
-                  {selected.enrolledStudents.map(sid => {
+                  {myEnrollments.filter(e => e.subjectId === selected.id).map(e => {
+                    const sid = e.studentId;
                     const student = users.find(u => u.id === sid);
                     if (!student) return null;
                     const marks = getStudentMarks(sid, selected.id);
                     const pct = marks.total > 0 ? Math.round((marks.obtained / marks.total) * 100) : 0;
                     return (
-                      <Card key={sid} style={styles.studentCard}>
+                      <Card key={e.id} style={styles.studentCard}>
                         <View style={styles.studentRow}>
                           <View style={styles.studentAvatar}>
                             <Text style={styles.studentAvatarText}>{student.name.charAt(0)}</Text>
@@ -163,6 +190,7 @@ export default function TeacherSubjects() {
               </View>
             </View>
             <Button label="Create Subject" onPress={handleCreate} loading={creating} fullWidth />
+            {createError ? <Text style={styles.createErrorText}>{createError}</Text> : null}
           </View>
         </Pressable>
       </Modal>
@@ -211,4 +239,5 @@ const styles = StyleSheet.create({
   label: { fontSize: 13, fontFamily: 'Poppins_600SemiBold', color: Colors.text, marginBottom: 6 },
   input: { backgroundColor: Colors.background, borderRadius: 12, borderWidth: 1.5, borderColor: Colors.border, paddingHorizontal: 14, height: 48, fontSize: 14, fontFamily: 'Poppins_400Regular', color: Colors.text },
   rowInputs: { flexDirection: 'row', gap: 12 },
+  createErrorText: { fontSize: 13, fontFamily: 'Poppins_400Regular', color: Colors.error, textAlign: 'center' },
 });

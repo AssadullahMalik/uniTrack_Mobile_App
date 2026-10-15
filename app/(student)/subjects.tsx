@@ -1,15 +1,19 @@
 import React, { useState } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, Pressable, Modal, TextInput, Platform,
+  View, Text, StyleSheet, ScrollView, Pressable, Modal, Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
+import * as DocumentPicker from 'expo-document-picker';
 import { useApp } from '@/context/AppContext';
 import { Colors } from '@/constants/colors';
 import { Card } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import * as Haptics from 'expo-haptics';
+import { uploadAssignmentFile } from '@/src/services/assignments';
+import { createEnrollmentRequest } from '@/src/services/enrollment';
+import { subscribeEnrollmentsForStudent, type Enrollment } from '@/src/services/enrollments';
 
 function MarksBar({ obtained, total, color }: { obtained: number; total: number; color: string }) {
   const pct = total > 0 ? Math.min((obtained / total) * 100, 100) : 0;
@@ -30,23 +34,65 @@ const mbStyles = StyleSheet.create({
 });
 
 export default function StudentSubjects() {
-  const { currentUser, subjects, assignments, submissions, getStudentMarks, enrollInSubject, unenrollFromSubject } = useApp();
+  const { currentUser, subjects, assignments, submissions, getStudentMarks, unenrollFromSubject } = useApp();
   const insets = useSafeAreaInsets();
   const [selectedSubject, setSelectedSubject] = useState<string | null>(null);
   const [showAssignModal, setShowAssignModal] = useState(false);
   const [selectedAssignment, setSelectedAssignment] = useState<string | null>(null);
-  const [submissionText, setSubmissionText] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const { submitAssignment } = useApp();
+  const [selectedFile, setSelectedFile] = useState<{
+    uri: string;
+    name: string;
+    mimeType: string | null;
+    size: number | null;
+  } | null>(null);
+  const [fileError, setFileError] = useState('');
+  const [enrollingSubjectId, setEnrollingSubjectId] = useState<string | null>(null);
+  const [enrollError, setEnrollError] = useState('');
 
-  const mySubjects = subjects.filter(s => s.enrolledStudents.includes(currentUser?.id ?? ''));
-  const allOtherSubjects = subjects.filter(s => !s.enrolledStudents.includes(currentUser?.id ?? ''));
+  const [myEnrollments, setMyEnrollments] = useState<Enrollment[]>([]);
+  const currentUserId = currentUser?.id;
+  React.useEffect(() => {
+    if (!currentUserId) return;
+    const unsub = subscribeEnrollmentsForStudent(
+      currentUserId,
+      rows => setMyEnrollments(rows),
+      err => console.error('enrollments student snapshot error', err),
+    );
+    return () => unsub();
+  }, [currentUserId]);
+
+  const enrolledSubjectIds = React.useMemo(() => new Set(myEnrollments.map(e => e.subjectId)), [myEnrollments]);
+  const mySubjects = subjects.filter(s => enrolledSubjectIds.has(s.id));
+  const allOtherSubjects = subjects.filter(s => !enrolledSubjectIds.has(s.id));
   const webTop = Platform.OS === 'web' ? 67 : 0;
 
   const handleEnroll = async (subjectId: string) => {
     if (!currentUser) return;
-    await enrollInSubject(subjectId, currentUser.id);
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    const subject = subjects.find(s => s.id === subjectId);
+    if (!subject) return;
+
+    setEnrollError('');
+    setEnrollingSubjectId(subjectId);
+
+    try {
+      await createEnrollmentRequest({
+        studentId: currentUser.id,
+        studentName: currentUser.name,
+        subjectId: subject.id,
+        teacherId: subject.teacherId,
+        type: currentUser.role === 'cr' ? 'cr' : 'student',
+      });
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (err: any) {
+      const msg = err?.message?.includes('pending')
+        ? err.message
+        : 'Failed to send enrollment request. Please try again.';
+      setEnrollError(msg);
+    } finally {
+      setEnrollingSubjectId(null);
+    }
   };
 
   const handleUnenroll = async (subjectId: string) => {
@@ -55,20 +101,97 @@ export default function StudentSubjects() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
   };
 
+  const handlePickFile = async () => {
+    try {
+      setFileError('');
+
+      const res = await DocumentPicker.getDocumentAsync({
+        type: [
+          'application/pdf',
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          'image/*',
+        ],
+        multiple: false,
+        copyToCacheDirectory: true,
+      });
+
+      if (res.canceled) return;
+
+      const file = res.assets[0];
+
+      if (file.size != null && file.size > 10 * 1024 * 1024) {
+        setFileError('File size must be below 10MB.');
+        return;
+      }
+
+      setSelectedFile({
+        uri: file.uri,
+        name: file.name,
+        mimeType: file.mimeType ?? null,
+        size: file.size ?? null,
+      });
+    } catch {
+      setFileError('Failed to pick file. Please try again.');
+    }
+  };
+
   const handleSubmitAssignment = async () => {
-    if (!currentUser || !selectedAssignment || !submissionText.trim()) return;
+    if (!currentUser || !selectedAssignment) return;
+
+    if (!selectedFile) {
+      setFileError('Please choose a file to upload.');
+      return;
+    }
+
+    const existingLocal = submissions.find(
+      s => s.assignmentId === selectedAssignment && s.studentId === currentUser.id,
+    );
+    if (existingLocal) {
+      setFileError('You have already submitted this assignment.');
+      return;
+    }
+
     setSubmitting(true);
+    setFileError('');
+
     const asgn = assignments.find(a => a.id === selectedAssignment);
-    await submitAssignment({
-      assignmentId: selectedAssignment,
-      studentId: currentUser.id,
-      studentName: currentUser.name,
-      content: submissionText.trim(),
-    });
-    setSubmitting(false);
-    setSubmissionText('');
-    setShowAssignModal(false);
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    if (!asgn) {
+      setFileError('Assignment not found.');
+      setSubmitting(false);
+      return;
+    }
+
+    try {
+      const fileUrl = await uploadAssignmentFile({
+        studentId: currentUser.id,
+        studentName: currentUser.name,
+        subjectId: asgn.subjectId,
+        assignmentId: selectedAssignment,
+        fileUri: selectedFile.uri,
+        fileName: selectedFile.name,
+        mimeType: selectedFile.mimeType,
+      });
+
+      await submitAssignment({
+        assignmentId: selectedAssignment,
+        studentId: currentUser.id,
+        studentName: currentUser.name,
+        content: '',
+        fileName: selectedFile.name,
+        fileUrl,
+      });
+
+      setSubmitting(false);
+      setShowAssignModal(false);
+      setSelectedFile(null);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (err: any) {
+      const msg = err?.message?.includes('already submitted')
+        ? err.message
+        : 'Failed to submit assignment. Please check your connection and try again.';
+      setFileError(msg);
+      setSubmitting(false);
+    }
   };
 
   const selected = selectedSubject ? subjects.find(s => s.id === selectedSubject) : null;
@@ -121,6 +244,11 @@ export default function StudentSubjects() {
         {allOtherSubjects.length > 0 && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Available Subjects</Text>
+            {enrollError ? (
+              <Text style={{ fontSize: 12, fontFamily: 'Poppins_400Regular', color: Colors.error, marginBottom: 8 }}>
+                {enrollError}
+              </Text>
+            ) : null}
             {allOtherSubjects.map(sub => (
               <Card key={sub.id} style={styles.availableCard}>
                 <View style={styles.availableRow}>
@@ -129,8 +257,14 @@ export default function StudentSubjects() {
                     <Text style={styles.subjectCode}>{sub.code} · {sub.department}</Text>
                     <Text style={styles.teacherSmall}>{sub.teacherName}</Text>
                   </View>
-                  <Pressable style={styles.enrollBtn} onPress={() => handleEnroll(sub.id)}>
-                    <Text style={styles.enrollBtnText}>Enroll</Text>
+                  <Pressable
+                    style={styles.enrollBtn}
+                    onPress={() => handleEnroll(sub.id)}
+                    disabled={enrollingSubjectId === sub.id}
+                  >
+                    <Text style={styles.enrollBtnText}>
+                      {enrollingSubjectId === sub.id ? 'Sending...' : 'Enroll'}
+                    </Text>
                   </Pressable>
                 </View>
               </Card>
@@ -243,17 +377,42 @@ export default function StudentSubjects() {
           <View style={[styles.submitSheet, { paddingBottom: insets.bottom + 24 }]}>
             <View style={styles.sheetHandle2} />
             <Text style={styles.sheetTitle}>Submit Assignment</Text>
-            <TextInput
-              style={styles.textArea}
-              multiline
-              numberOfLines={6}
-              placeholder="Write your answer or paste your submission content here..."
-              placeholderTextColor={Colors.textMuted}
-              value={submissionText}
-              onChangeText={setSubmissionText}
-              textAlignVertical="top"
+            <Pressable
+              style={[styles.inputContainer, { marginBottom: 8 }]}
+              onPress={handlePickFile}
+            >
+              <Feather name="paperclip" size={18} color={Colors.textMuted} style={styles.inputIcon} />
+              <Text
+                style={{
+                  flex: 1,
+                  fontSize: 14,
+                  fontFamily: 'Poppins_400Regular',
+                  color: selectedFile ? Colors.text : Colors.textMuted,
+                }}
+                numberOfLines={1}
+              >
+                {selectedFile ? selectedFile.name : 'Choose file (PDF, DOCX, Image)'}
+              </Text>
+            </Pressable>
+            {fileError ? (
+              <Text
+                style={{
+                  fontSize: 12,
+                  fontFamily: 'Poppins_400Regular',
+                  color: Colors.error,
+                  marginBottom: 4,
+                }}
+              >
+                {fileError}
+              </Text>
+            ) : null}
+            <Button
+              label="Submit Assignment"
+              onPress={handleSubmitAssignment}
+              loading={submitting}
+              fullWidth
+              disabled={submitting}
             />
-            <Button label="Submit Assignment" onPress={handleSubmitAssignment} loading={submitting} fullWidth />
           </View>
         </Pressable>
       </Modal>
@@ -315,6 +474,8 @@ const styles = StyleSheet.create({
   submitSheet: { backgroundColor: Colors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, gap: 16 },
   sheetHandle2: { width: 40, height: 4, borderRadius: 2, backgroundColor: Colors.border, alignSelf: 'center', marginBottom: 8 },
   sheetTitle: { fontSize: 18, fontFamily: 'Poppins_700Bold', color: Colors.text },
+  inputContainer: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: Colors.background, borderRadius: 12, borderWidth: 1.5, borderColor: Colors.border, padding: 14 },
+  inputIcon: { flexShrink: 0 },
   textArea: { backgroundColor: Colors.background, borderRadius: 12, borderWidth: 1.5, borderColor: Colors.border, padding: 14, fontSize: 14, fontFamily: 'Poppins_400Regular', color: Colors.text, minHeight: 120 },
   emptySmall: { alignItems: 'center', padding: 24 },
   emptySmallText: { fontSize: 14, fontFamily: 'Poppins_400Regular', color: Colors.textMuted },

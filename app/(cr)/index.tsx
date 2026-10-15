@@ -11,7 +11,7 @@ import { Badge } from '@/components/ui/Badge';
 import * as Haptics from 'expo-haptics';
 
 export default function CRHome() {
-  const { currentUser, subjects, assignments, tests, presentations, logout, notifications } = useApp();
+  const { currentUser, subjects, assignments, tests, presentations, logout } = useApp();
   const insets = useSafeAreaInsets();
   const [showProfile, setShowProfile] = useState(false);
   const webTop = Platform.OS === 'web' ? 67 : 0;

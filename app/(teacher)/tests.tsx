@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, Pressable, Modal, TextInput, Platform } from 'react-native';
+import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { useApp } from '@/context/AppContext';
@@ -14,6 +15,7 @@ function generateId() { return Date.now().toString() + Math.random().toString(36
 
 export default function TeacherTests() {
   const { currentUser, subjects, tests, testResults, users, presentations, addTest, addPresentation, addPresentationMark } = useApp();
+  const router = useRouter();
   const insets = useSafeAreaInsets();
   const [activeTab, setActiveTab] = useState<'tests' | 'presentations'>('tests');
   const [showCreateTest, setShowCreateTest] = useState(false);
@@ -160,9 +162,17 @@ export default function TeacherTests() {
                     <Text style={styles.testTitle}>{t.title}</Text>
                     <Text style={styles.testSub}>{t.subjectName}</Text>
                   </View>
-                  <Pressable onPress={() => setShowResults(t.id)} style={styles.resultsBtn}>
-                    <Feather name="bar-chart-2" size={18} color={Colors.teacher} />
-                  </Pressable>
+                  <View style={{ flexDirection: 'row', gap: 6 }}>
+                    <Pressable onPress={() => setShowResults(t.id)} style={styles.resultsBtn}>
+                      <Feather name="bar-chart-2" size={18} color={Colors.teacher} />
+                    </Pressable>
+                    <Pressable
+                      style={styles.resultsBtn}
+                      onPress={() => router.push({ pathname: '/(teacher)/test-submissions', params: { testId: t.id } })}
+                    >
+                      <Feather name="users" size={18} color={Colors.teacher} />
+                    </Pressable>
+                  </View>
                 </View>
                 <View style={styles.testMeta}>
                   <View style={styles.metaItem}><Feather name="clock" size={12} color={Colors.textMuted} /><Text style={styles.metaText}>{t.duration} min</Text></View>

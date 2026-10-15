@@ -1,4 +1,7 @@
-import React, { createContext, useContext, useState, useEffect, useMemo, ReactNode } from 'react';
+import { doc, setDoc, updateDoc, deleteDoc, getDoc, getDocs, collection, onSnapshot, query, where, serverTimestamp, arrayRemove, arrayUnion, writeBatch, type Query } from "firebase/firestore";
+import { onAuthStateChanged, signOut } from "firebase/auth";
+import { auth, db } from "@/firebaseConfig";
+import React, { createContext, useContext, useState, useEffect, useMemo, useRef, ReactNode } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export type UserRole = 'student' | 'teacher' | 'cr' | 'admin';
@@ -7,14 +10,17 @@ export interface User {
   id: string;
   name: string;
   email: string;
-  password: string;
   role: UserRole;
   department?: string;
   rollNumber?: string;
   semester?: string;
+  phone?: string;
+  bio?: string;
+  photoURL?: string;
   isApproved?: boolean;
   createdAt: string;
 }
+
 
 export interface Subject {
   id: string;
@@ -24,6 +30,7 @@ export interface Subject {
   semester: string;
   teacherId: string;
   teacherName: string;
+  status?: 'active' | 'inactive';
   courseOutlineUrl?: string;
   creditHours: number;
   enrolledStudents: string[];
@@ -44,12 +51,22 @@ export interface Assignment {
 
 export interface Submission {
   id: string;
-  assignmentId: string;
+  /** Set for assignment file submissions. */
+  assignmentId?: string;
+  /** Set for test submissions (mirrored into submissions/ with a deterministic id). */
+  testId?: string;
   studentId: string;
   studentName: string;
-  content: string;
+  subjectId?: string;
+  rollNumber?: string;
+  content?: string;
   fileName?: string;
+  fileUrl?: string;
+  answers?: number[];
+  score?: number;
+  totalMarks?: number;
   submittedAt: string;
+  /** Manual, teacher-owned grade; absent until graded. */
   marks?: number;
   feedback?: string;
   gradedAt?: string;
@@ -140,8 +157,10 @@ interface AppContextValue {
   announcements: Announcement[];
   isLoading: boolean;
 
-  login: (email: string, password: string) => Promise<User | null>;
-  register: (user: Omit<User, 'id' | 'createdAt'>) => Promise<boolean>;
+  /** Fetch user profile from Firestore by Firebase Auth uid. Call after signInWithEmailVerification. */
+  getProfileByUid: (uid: string) => Promise<User | null>;
+  /** Create Firestore profile only (no password). Call after createUserWithEmailAndPassword; pass uid. */
+  registerProfile: (profile: Omit<User, 'id' | 'createdAt' | 'password'>, uid: string) => Promise<void>;
   logout: () => Promise<void>;
 
   addSubject: (subject: Omit<Subject, 'id' | 'createdAt'>) => Promise<void>;
@@ -178,7 +197,6 @@ interface AppContextValue {
   };
   getUnreadCount: (userId: string) => number;
 }
-
 const AppContext = createContext<AppContextValue | null>(null);
 
 const STORAGE_KEYS = {
@@ -199,168 +217,59 @@ function generateId(): string {
   return Date.now().toString() + Math.random().toString(36).substr(2, 9);
 }
 
-const SEED_USERS: User[] = [
-  {
-    id: 'admin1',
-    name: 'Admin User',
-    email: 'admin@muet.edu.pk',
-    password: 'admin123',
-    role: 'admin',
-    department: 'Administration',
-    isApproved: true,
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'teacher1',
-    name: 'Dr. Ahmed Khan',
-    email: 'ahmed.khan@muet.edu.pk',
-    password: 'teacher123',
-    role: 'teacher',
-    department: 'Computer Science',
-    isApproved: true,
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'student1',
-    name: 'Ali Hassan',
-    email: 'ali.hassan@muet.edu.pk',
-    password: 'student123',
-    role: 'student',
-    department: 'Computer Science',
-    rollNumber: '19SW01',
-    semester: '6',
-    isApproved: true,
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'cr1',
-    name: 'Sara Malik',
-    email: 'sara.malik@muet.edu.pk',
-    password: 'cr123',
-    role: 'cr',
-    department: 'Computer Science',
-    rollNumber: '19SW02',
-    semester: '6',
-    isApproved: true,
-    createdAt: new Date().toISOString(),
-  },
-];
+/** Convert a Firestore Timestamp | ISO string | null into an ISO string. */
+function toIsoString(value: unknown): string {
+  if (typeof value === 'string' && value.length > 0) return value;
+  if (value && typeof value === 'object' && 'toDate' in value) {
+    try {
+      return (value as { toDate: () => Date }).toDate().toISOString();
+    } catch {
+      /* fall through */
+    }
+  }
+  return new Date().toISOString();
+}
 
-const SEED_SUBJECTS: Subject[] = [
-  {
-    id: 'sub1',
-    name: 'Software Engineering',
-    code: 'SE-401',
-    department: 'Computer Science',
-    semester: '6',
-    teacherId: 'teacher1',
-    teacherName: 'Dr. Ahmed Khan',
-    creditHours: 3,
-    enrolledStudents: ['student1', 'cr1'],
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'sub2',
-    name: 'Database Systems',
-    code: 'DB-302',
-    department: 'Computer Science',
-    semester: '6',
-    teacherId: 'teacher1',
-    teacherName: 'Dr. Ahmed Khan',
-    creditHours: 3,
-    enrolledStudents: ['student1', 'cr1'],
-    createdAt: new Date().toISOString(),
-  },
-];
+/** Parse a users/{id} document; strips any legacy password field defensively. */
+function parseUserDoc(id: string, data: Record<string, unknown>): User {
+  const { password: _p, ...rest } = data;
+  return { ...rest, id, createdAt: toIsoString(data.createdAt) } as User;
+}
 
-const SEED_ASSIGNMENTS: Assignment[] = [
-  {
-    id: 'asgn1',
-    subjectId: 'sub1',
-    subjectName: 'Software Engineering',
-    teacherId: 'teacher1',
-    title: 'UML Diagrams Assignment',
-    description: 'Create use case, class, and sequence diagrams for an e-commerce system.',
-    deadline: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
-    totalMarks: 20,
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'asgn2',
-    subjectId: 'sub2',
-    subjectName: 'Database Systems',
-    teacherId: 'teacher1',
-    title: 'ER Diagram & Normalization',
-    description: 'Design an ER diagram for a university management system and normalize to 3NF.',
-    deadline: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
-    totalMarks: 25,
-    createdAt: new Date().toISOString(),
-  },
-];
+/** Parse a submissions/{id} document (assignment file or test submission). */
+function parseSubmissionDoc(id: string, data: Record<string, unknown>): Submission {
+  return {
+    id,
+    assignmentId: (data.assignmentId as string) || undefined,
+    testId: (data.testId as string) || undefined,
+    studentId: (data.studentId as string) ?? '',
+    studentName: (data.studentName as string) ?? '',
+    subjectId: (data.subjectId as string) || undefined,
+    rollNumber: (data.rollNumber as string) || undefined,
+    content: (data.content as string) ?? '',
+    fileName: (data.fileName as string) || undefined,
+    fileUrl: (data.fileUrl as string) || undefined,
+    answers: Array.isArray(data.answers) ? (data.answers as number[]) : undefined,
+    score: typeof data.score === 'number' ? data.score : undefined,
+    totalMarks: typeof data.totalMarks === 'number' ? data.totalMarks : undefined,
+    submittedAt: toIsoString(data.submittedAt),
+    marks: typeof data.marks === 'number' ? data.marks : undefined,
+    feedback: typeof data.feedback === 'string' ? data.feedback : undefined,
+    gradedAt: data.gradedAt ? toIsoString(data.gradedAt) : undefined,
+  };
+}
 
-const SEED_TESTS: Test[] = [
-  {
-    id: 'test1',
-    subjectId: 'sub1',
-    subjectName: 'Software Engineering',
-    teacherId: 'teacher1',
-    title: 'Sessional Test 1 – SDLC',
-    duration: 30,
-    totalMarks: 20,
-    scheduledAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString(),
-    questions: [
-      { id: 'q1', text: 'Which SDLC model is best for well-defined requirements?', options: ['Agile', 'Waterfall', 'Spiral', 'Prototype'], correctIndex: 1 },
-      { id: 'q2', text: 'What does UML stand for?', options: ['Universal Modeling Language', 'Unified Modeling Language', 'Unique Markup Language', 'None'], correctIndex: 1 },
-      { id: 'q3', text: 'Which diagram shows system behavior over time?', options: ['Class Diagram', 'ER Diagram', 'Sequence Diagram', 'Use Case'], correctIndex: 2 },
-      { id: 'q4', text: 'Agile methodology is based on:', options: ['Documentation', 'Iteration', 'Planning only', 'Code review'], correctIndex: 1 },
-    ],
-    createdAt: new Date().toISOString(),
-  },
-];
-
-const SEED_PRESENTATIONS: Presentation[] = [
-  {
-    id: 'pres1',
-    subjectId: 'sub1',
-    subjectName: 'Software Engineering',
-    teacherId: 'teacher1',
-    title: 'Final Project Presentation',
-    scheduledAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-    duration: 15,
-    venue: 'CS Lab 1',
-    createdAt: new Date().toISOString(),
-  },
-];
-
-const SEED_NOTIFICATIONS: Notification[] = [
-  {
-    id: 'notif1',
-    userId: 'student1',
-    title: 'New Assignment Posted',
-    body: 'UML Diagrams Assignment has been posted in Software Engineering.',
-    type: 'assignment',
-    read: false,
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'notif2',
-    userId: 'student1',
-    title: 'Sessional Test Scheduled',
-    body: 'SDLC Test is scheduled in 2 days. Be prepared!',
-    type: 'test',
-    read: false,
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'notif3',
-    userId: 'cr1',
-    title: 'New Assignment Posted',
-    body: 'UML Diagrams Assignment has been posted in Software Engineering.',
-    type: 'assignment',
-    read: false,
-    createdAt: new Date().toISOString(),
-  },
-];
+/** Parse a presentationMarks/{id} document. */
+function parsePresentationMarkDoc(id: string, data: Record<string, unknown>): PresentationMark {
+  return {
+    id,
+    presentationId: (data.presentationId as string) ?? '',
+    studentId: (data.studentId as string) ?? '',
+    marks: typeof data.marks === 'number' ? data.marks : 0,
+    totalMarks: typeof data.totalMarks === 'number' ? data.totalMarks : 0,
+    feedback: (data.feedback as string) || undefined,
+  };
+}
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
@@ -369,12 +278,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [tests, setTests] = useState<Test[]>([]);
-  const [testResults, setTestResults] = useState<TestResult[]>([]);
   const [presentations, setPresentations] = useState<Presentation[]>([]);
   const [presentationMarks, setPresentationMarks] = useState<PresentationMark[]>([]);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+
+  const currentUserRef = useRef<User | null>(null);
+  useEffect(() => {
+    currentUserRef.current = currentUser;
+  }, [currentUser]);
+
+  // Submissions and presentation marks arrive through several role-scoped
+  // Firestore queries; each query owns a "source" entry so removals stay consistent.
+  const submissionSourcesRef = useRef(new Map<string, Submission[]>());
+  const presentationMarkSourcesRef = useRef(new Map<string, PresentationMark[]>());
+  const teacherScopedSubsRef = useRef(new Map<string, () => void>());
 
   useEffect(() => {
     loadData();
@@ -382,252 +301,641 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   async function loadData() {
     try {
-      const [
-        usersData, currentUserData, subjectsData, assignmentsData,
-        submissionsData, testsData, testResultsData, presentationsData,
-        presentationMarksData, notificationsData, announcementsData,
-      ] = await Promise.all([
-        AsyncStorage.getItem(STORAGE_KEYS.USERS),
-        AsyncStorage.getItem(STORAGE_KEYS.CURRENT_USER),
-        AsyncStorage.getItem(STORAGE_KEYS.SUBJECTS),
-        AsyncStorage.getItem(STORAGE_KEYS.ASSIGNMENTS),
-        AsyncStorage.getItem(STORAGE_KEYS.SUBMISSIONS),
-        AsyncStorage.getItem(STORAGE_KEYS.TESTS),
-        AsyncStorage.getItem(STORAGE_KEYS.TEST_RESULTS),
-        AsyncStorage.getItem(STORAGE_KEYS.PRESENTATIONS),
-        AsyncStorage.getItem(STORAGE_KEYS.PRESENTATION_MARKS),
-        AsyncStorage.getItem(STORAGE_KEYS.NOTIFICATIONS),
-        AsyncStorage.getItem(STORAGE_KEYS.ANNOUNCEMENTS),
-      ]);
-
-      const loadedUsers = usersData ? JSON.parse(usersData) : SEED_USERS;
-      if (!usersData) {
-        await AsyncStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(SEED_USERS));
-      }
-      const loadedSubjects = subjectsData ? JSON.parse(subjectsData) : SEED_SUBJECTS;
-      if (!subjectsData) {
-        await AsyncStorage.setItem(STORAGE_KEYS.SUBJECTS, JSON.stringify(SEED_SUBJECTS));
-      }
-      const loadedAssignments = assignmentsData ? JSON.parse(assignmentsData) : SEED_ASSIGNMENTS;
-      if (!assignmentsData) {
-        await AsyncStorage.setItem(STORAGE_KEYS.ASSIGNMENTS, JSON.stringify(SEED_ASSIGNMENTS));
-      }
-      const loadedTests = testsData ? JSON.parse(testsData) : SEED_TESTS;
-      if (!testsData) {
-        await AsyncStorage.setItem(STORAGE_KEYS.TESTS, JSON.stringify(SEED_TESTS));
-      }
-      const loadedPresentations = presentationsData ? JSON.parse(presentationsData) : SEED_PRESENTATIONS;
-      if (!presentationsData) {
-        await AsyncStorage.setItem(STORAGE_KEYS.PRESENTATIONS, JSON.stringify(SEED_PRESENTATIONS));
-      }
-      const loadedNotifications = notificationsData ? JSON.parse(notificationsData) : SEED_NOTIFICATIONS;
-      if (!notificationsData) {
-        await AsyncStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(SEED_NOTIFICATIONS));
-      }
-
-      setUsers(loadedUsers);
-      setSubjects(loadedSubjects);
-      setAssignments(loadedAssignments);
-      setSubmissions(submissionsData ? JSON.parse(submissionsData) : []);
-      setTests(loadedTests);
-      setTestResults(testResultsData ? JSON.parse(testResultsData) : []);
-      setPresentations(loadedPresentations);
-      setPresentationMarks(presentationMarksData ? JSON.parse(presentationMarksData) : []);
-      setNotifications(loadedNotifications);
-      setAnnouncements(announcementsData ? JSON.parse(announcementsData) : []);
-      if (currentUserData) {
-        setCurrentUser(JSON.parse(currentUserData));
-      }
+      const entries = await AsyncStorage.multiGet(Object.values(STORAGE_KEYS));
+      const cache = new Map(entries);
+      const readJson = <T,>(key: string, fallback: T): T => {
+        const raw = cache.get(key);
+        if (!raw) return fallback;
+        try {
+          return JSON.parse(raw) as T;
+        } catch {
+          return fallback;
+        }
+      };
+      setUsers(readJson<User[]>(STORAGE_KEYS.USERS, []));
+      setSubjects(readJson<Subject[]>(STORAGE_KEYS.SUBJECTS, []));
+      setAssignments(readJson<Assignment[]>(STORAGE_KEYS.ASSIGNMENTS, []));
+      setSubmissions(readJson<Submission[]>(STORAGE_KEYS.SUBMISSIONS, []));
+      setTests(readJson<Test[]>(STORAGE_KEYS.TESTS, []));
+      setPresentations(readJson<Presentation[]>(STORAGE_KEYS.PRESENTATIONS, []));
+      setPresentationMarks(readJson<PresentationMark[]>(STORAGE_KEYS.PRESENTATION_MARKS, []));
+      setNotifications(readJson<Notification[]>(STORAGE_KEYS.NOTIFICATIONS, []));
+      setAnnouncements(readJson<Announcement[]>(STORAGE_KEYS.ANNOUNCEMENTS, []));
+      setCurrentUser(readJson<User | null>(STORAGE_KEYS.CURRENT_USER, null));
     } catch (e) {
-      console.error('Failed to load data', e);
+      console.error('Failed to hydrate cached data', e);
     } finally {
       setIsLoading(false);
     }
   }
 
+  // Keep the app session in sync with Firebase Auth (persisted across restarts).
+  // Read-only: profile creation is owned by the register/login flows.
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async fbUser => {
+      if (!fbUser) {
+        setCurrentUser(null);
+        AsyncStorage.removeItem(STORAGE_KEYS.CURRENT_USER).catch(() => {});
+        return;
+      }
+      if (currentUserRef.current?.id === fbUser.uid) return;
+      try {
+        const snap = await getDoc(doc(db, 'users', fbUser.uid));
+        if (snap.exists()) {
+          const user = parseUserDoc(snap.id, snap.data() as Record<string, unknown>);
+          setCurrentUser(user);
+          await AsyncStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(user));
+        }
+      } catch (e) {
+        console.warn('[auth] profile bootstrap read failed', e);
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  // Live Firestore subscriptions, shaped to match firestore.rules:
+  //   - collections every verified user can list: subjects(active)/assignments/tests/presentations/announcements
+  //   - users: teachers/admins list all; students/CRs may read only their own profile
+  //   - notifications: own inbox only
+  //   - submissions/presentationMarks: students list their own; teachers per owned item
+  useEffect(() => {
+    if (!currentUser) return;
+    const uid = currentUser.id;
+    const role = currentUser.role;
+    const unsubs: Array<() => void> = [];
+
+    unsubs.push(onSnapshot(
+      query(collection(db, 'subjects'), where('status', '==', 'active')),
+      snap => {
+        const rows = snap.docs.map(d => ({ id: d.id, ...(d.data() as Record<string, unknown>) })) as Subject[];
+        setSubjects(rows);
+        persist(STORAGE_KEYS.SUBJECTS, rows).catch(() => {});
+      },
+      err => console.error('[subjects] snapshot error', err),
+    ));
+
+    unsubs.push(onSnapshot(
+      collection(db, 'assignments'),
+      snap => {
+        const rows = snap.docs.map(d => ({ id: d.id, ...(d.data() as Record<string, unknown>) })) as Assignment[];
+        setAssignments(rows);
+        persist(STORAGE_KEYS.ASSIGNMENTS, rows).catch(() => {});
+      },
+      err => console.error('[assignments] snapshot error', err),
+    ));
+
+    unsubs.push(onSnapshot(
+      collection(db, 'tests'),
+      snap => {
+        const rows = snap.docs.map(d => ({ id: d.id, ...(d.data() as Record<string, unknown>) })) as Test[];
+        setTests(rows);
+        persist(STORAGE_KEYS.TESTS, rows).catch(() => {});
+      },
+      err => console.error('[tests] snapshot error', err),
+    ));
+
+    unsubs.push(onSnapshot(
+      collection(db, 'presentations'),
+      snap => {
+        const rows = snap.docs.map(d => ({ id: d.id, ...(d.data() as Record<string, unknown>) })) as Presentation[];
+        setPresentations(rows);
+        persist(STORAGE_KEYS.PRESENTATIONS, rows).catch(() => {});
+      },
+      err => console.error('[presentations] snapshot error', err),
+    ));
+
+    unsubs.push(onSnapshot(
+      collection(db, 'announcements'),
+      snap => {
+        const rows = snap.docs.map(d => {
+          const data = d.data() as Record<string, unknown>;
+          return { id: d.id, ...data, createdAt: toIsoString(data.createdAt) } as Announcement;
+        });
+        setAnnouncements(rows);
+        persist(STORAGE_KEYS.ANNOUNCEMENTS, rows).catch(() => {});
+      },
+      err => console.error('[announcements] snapshot error', err),
+    ));
+
+    unsubs.push(onSnapshot(
+      query(collection(db, 'notifications'), where('userId', '==', uid)),
+      snap => {
+        const rows = snap.docs.map(d => {
+          const data = d.data() as Record<string, unknown>;
+          return { id: d.id, ...data, createdAt: toIsoString(data.createdAt) } as Notification;
+        });
+        rows.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        setNotifications(rows);
+        persist(STORAGE_KEYS.NOTIFICATIONS, rows).catch(() => {});
+      },
+      err => console.error('[notifications] snapshot error', err),
+    ));
+
+    if (role === 'teacher' || role === 'admin') {
+      unsubs.push(onSnapshot(
+        collection(db, 'users'),
+        snap => {
+          const rows = snap.docs.map(d => parseUserDoc(d.id, d.data() as Record<string, unknown>));
+          setUsers(rows);
+          persist(STORAGE_KEYS.USERS, rows).catch(() => {});
+        },
+        err => console.error('[users] snapshot error', err),
+      ));
+    } else {
+      unsubs.push(onSnapshot(
+        doc(db, 'users', uid),
+        snap => {
+          if (!snap.exists()) return;
+          const user = parseUserDoc(snap.id, snap.data() as Record<string, unknown>);
+          setUsers([user]);
+          if (currentUserRef.current?.id === user.id) {
+            setCurrentUser(user);
+            AsyncStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(user)).catch(() => {});
+          }
+        },
+        err => console.error('[users] snapshot error', err),
+      ));
+    }
+
+    if (role === 'student' || role === 'cr') {
+      unsubs.push(subscribeSubmissionSource(
+        `self:${uid}`,
+        query(collection(db, 'submissions'), where('studentId', '==', uid)),
+      ));
+      unsubs.push(subscribePresentationMarkSource(
+        `self:${uid}`,
+        query(collection(db, 'presentationMarks'), where('studentId', '==', uid)),
+      ));
+    }
+
+    return () => {
+      unsubs.forEach(u => u());
+      teacherScopedSubsRef.current.forEach(u => u());
+      teacherScopedSubsRef.current.clear();
+      submissionSourcesRef.current.clear();
+      presentationMarkSourcesRef.current.clear();
+    };
+  }, [currentUser?.id, currentUser?.role]);
+
+  // Identifiers of the items owned by the signed-in teacher. Teachers can list
+  // submissions/marks only for the assignments/tests/presentations they own.
+  const teacherOwnedIds = useMemo(() => {
+    if (currentUser?.role !== 'teacher') {
+      return { assignmentIds: [] as string[], testIds: [] as string[], presentationIds: [] as string[] };
+    }
+    const uid = currentUser.id;
+    return {
+      assignmentIds: assignments.filter(a => a.teacherId === uid).map(a => a.id),
+      testIds: tests.filter(t => t.teacherId === uid).map(t => t.id),
+      presentationIds: presentations.filter(p => p.teacherId === uid).map(p => p.id),
+    };
+  }, [currentUser?.id, currentUser?.role, assignments, tests, presentations]);
+
+  const teacherOwnedKey = `${teacherOwnedIds.assignmentIds.join(',')}|${teacherOwnedIds.testIds.join(',')}|${teacherOwnedIds.presentationIds.join(',')}`;
+
+  useEffect(() => {
+    if (currentUser?.role !== 'teacher') return;
+    const subs = teacherScopedSubsRef.current;
+    const wanted = new Set<string>();
+
+    for (const id of teacherOwnedIds.assignmentIds) {
+      const key = `a:${id}`;
+      wanted.add(key);
+      if (!subs.has(key)) {
+        subs.set(key, subscribeSubmissionSource(key, query(collection(db, 'submissions'), where('assignmentId', '==', id))));
+      }
+    }
+    for (const id of teacherOwnedIds.testIds) {
+      const key = `t:${id}`;
+      wanted.add(key);
+      if (!subs.has(key)) {
+        subs.set(key, subscribeSubmissionSource(key, query(collection(db, 'submissions'), where('testId', '==', id))));
+      }
+    }
+    for (const id of teacherOwnedIds.presentationIds) {
+      const key = `p:${id}`;
+      wanted.add(key);
+      if (!subs.has(key)) {
+        subs.set(key, subscribePresentationMarkSource(key, query(collection(db, 'presentationMarks'), where('presentationId', '==', id))));
+      }
+    }
+
+    for (const [key, unsub] of Array.from(subs.entries())) {
+      if (!wanted.has(key)) {
+        unsub();
+        subs.delete(key);
+        submissionSourcesRef.current.delete(key);
+        presentationMarkSourcesRef.current.delete(key);
+      }
+    }
+    recomputeSubmissions();
+    recomputePresentationMarks();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teacherOwnedKey, currentUser?.id, currentUser?.role]);
+
+  // Test results are derived from the test submissions mirrored into `submissions`.
+  const testResults: TestResult[] = useMemo(
+    () =>
+      submissions
+        .filter(s => !!s.testId)
+        .map(s => ({
+          id: s.id,
+          testId: s.testId as string,
+          studentId: s.studentId,
+          answers: s.answers ?? [],
+          score: s.score ?? 0,
+          totalMarks: s.totalMarks ?? 0,
+          submittedAt: s.submittedAt,
+        })),
+    [submissions],
+  );
+
   async function persist<T>(key: string, data: T[]) {
     await AsyncStorage.setItem(key, JSON.stringify(data));
   }
 
-  async function login(email: string, password: string): Promise<User | null> {
-    const user = users.find(u => u.email.toLowerCase() === email.toLowerCase() && u.password === password);
-    if (user) {
-      setCurrentUser(user);
-      await AsyncStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(user));
-      return user;
+  function recomputeSubmissions() {
+    const merged = new Map<string, Submission>();
+    const sources = Array.from(submissionSourcesRef.current.entries());
+    // Local optimistic entries first, so confirmed server data always wins.
+    for (const [key, rows] of sources) {
+      if (!key.startsWith('local:')) continue;
+      for (const row of rows) merged.set(row.id, row);
     }
-    return null;
+    for (const [key, rows] of sources) {
+      if (key.startsWith('local:')) continue;
+      for (const row of rows) merged.set(row.id, row);
+    }
+    const all = Array.from(merged.values()).sort(
+      (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime(),
+    );
+    setSubmissions(all);
+    persist(STORAGE_KEYS.SUBMISSIONS, all).catch(() => {});
   }
 
-  async function register(userData: Omit<User, 'id' | 'createdAt'>): Promise<boolean> {
-    if (users.find(u => u.email.toLowerCase() === userData.email.toLowerCase())) {
-      return false;
+  function subscribeSubmissionSource(key: string, q: Query): () => void {
+    return onSnapshot(
+      q,
+      snap => {
+        submissionSourcesRef.current.set(
+          key,
+          snap.docs.map(d => parseSubmissionDoc(d.id, d.data() as Record<string, unknown>)),
+        );
+        recomputeSubmissions();
+      },
+      err => console.error(`[submissions:${key}] snapshot error`, err),
+    );
+  }
+
+  function recomputePresentationMarks() {
+    const merged = new Map<string, PresentationMark>();
+    for (const rows of presentationMarkSourcesRef.current.values()) {
+      for (const row of rows) merged.set(row.id, row);
     }
-    const newUser: User = { ...userData, id: generateId(), createdAt: new Date().toISOString() };
-    const updated = [...users, newUser];
-    setUsers(updated);
-    await persist(STORAGE_KEYS.USERS, updated);
-    return true;
+    const all = Array.from(merged.values());
+    setPresentationMarks(all);
+    persist(STORAGE_KEYS.PRESENTATION_MARKS, all).catch(() => {});
+  }
+
+  function subscribePresentationMarkSource(key: string, q: Query): () => void {
+    return onSnapshot(
+      q,
+      snap => {
+        presentationMarkSourcesRef.current.set(
+          key,
+          snap.docs.map(d => parsePresentationMarkDoc(d.id, d.data() as Record<string, unknown>)),
+        );
+        recomputePresentationMarks();
+      },
+      err => console.error(`[presentationMarks:${key}] snapshot error`, err),
+    );
+  }
+
+  /**
+   * Fetch profile from Firestore by uid. Self-healing: if doc is missing, create it from Auth user and retry.
+   * Never block login just because profile is missing.
+   */
+  async function getProfileByUid(uid: string): Promise<User | null> {
+    let snap = await getDoc(doc(db, 'users', uid));
+
+    if (!snap.exists()) {
+      const fbUser = auth.currentUser;
+      if (fbUser?.uid === uid) {
+        try {
+          await setDoc(doc(db, 'users', uid), {
+            name: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
+            email: fbUser.email ?? '',
+            role: 'student',
+            isApproved: true,
+            createdAt: serverTimestamp(),
+          });
+          snap = await getDoc(doc(db, 'users', uid));
+        } catch (e) {
+          console.error('Self-heal: failed to create user doc', e);
+          return null;
+        }
+      } else {
+        return null;
+      }
+    }
+
+    if (!snap.exists()) return null;
+    const data = snap.data() as Record<string, unknown>;
+    const user = parseUserDoc(snap.id, data);
+    setCurrentUser(user);
+    await AsyncStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(user));
+    return user;
+  }
+
+  /** Create Firestore user profile only (no password). Used after createUserWithEmailAndPassword. */
+  async function registerProfile(profile: Omit<User, 'id' | 'createdAt' | 'password'>, uid: string): Promise<void> {
+    const profileData = {
+      name: profile.name,
+      email: profile.email,
+      role: profile.role,
+      department: profile.department ?? null,
+      rollNumber: profile.rollNumber ?? null,
+      semester: profile.semester ?? null,
+      isApproved: profile.isApproved ?? false,
+      createdAt: serverTimestamp(),
+    };
+    await setDoc(doc(db, 'users', uid), profileData);
   }
 
   async function logout(): Promise<void> {
+    try {
+      await signOut(auth);
+    } catch (e) {
+      console.error('Failed to sign out of Firebase Auth', e);
+    }
     setCurrentUser(null);
-    await AsyncStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
+    setUsers([]);
+    setSubmissions([]);
+    setPresentationMarks([]);
+    setNotifications([]);
+    teacherScopedSubsRef.current.forEach(u => u());
+    teacherScopedSubsRef.current.clear();
+    submissionSourcesRef.current.clear();
+    presentationMarkSourcesRef.current.clear();
+    try {
+      await AsyncStorage.multiRemove(Object.values(STORAGE_KEYS));
+    } catch (e) {
+      console.error('Failed to clear cached data on logout', e);
+    }
   }
 
   async function addSubject(subject: Omit<Subject, 'id' | 'createdAt'>): Promise<void> {
     const newSubject: Subject = { ...subject, id: generateId(), createdAt: new Date().toISOString() };
-    const updated = [...subjects, newSubject];
-    setSubjects(updated);
-    await persist(STORAGE_KEYS.SUBJECTS, updated);
+    // Firestore is the source of truth; the active-subjects snapshot refreshes the UI.
+    await setDoc(doc(db, 'subjects', newSubject.id), {
+      ...newSubject,
+      subjectId: newSubject.id,
+      subjectName: newSubject.name,
+      status: 'active' as const,
+    });
   }
 
+  /** Legacy helper kept for API compatibility; enrollments flow through src/services/enrollment.ts. */
   async function enrollInSubject(subjectId: string, studentId: string): Promise<void> {
-    const updated = subjects.map(s =>
-      s.id === subjectId && !s.enrolledStudents.includes(studentId)
-        ? { ...s, enrolledStudents: [...s.enrolledStudents, studentId] }
-        : s
-    );
-    setSubjects(updated);
-    await persist(STORAGE_KEYS.SUBJECTS, updated);
+    const student = users.find(u => u.id === studentId) ?? currentUser;
+    const subject = subjects.find(s => s.id === subjectId);
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'enrollments', `${studentId}_${subjectId}`), {
+      studentId,
+      studentName: student?.name ?? '',
+      subjectId,
+      teacherId: subject?.teacherId ?? '',
+      enrolledAt: serverTimestamp(),
+    });
+    batch.update(doc(db, 'subjects', subjectId), { enrolledStudents: arrayUnion(studentId) });
+    await batch.commit();
   }
 
   async function unenrollFromSubject(subjectId: string, studentId: string): Promise<void> {
-    const updated = subjects.map(s =>
-      s.id === subjectId
-        ? { ...s, enrolledStudents: s.enrolledStudents.filter(id => id !== studentId) }
-        : s
-    );
-    setSubjects(updated);
-    await persist(STORAGE_KEYS.SUBJECTS, updated);
+    // Optimistic local removal; the subjects snapshot reconciles after the server writes.
+    setSubjects(prev => prev.map(s => s.id === subjectId
+      ? { ...s, enrolledStudents: s.enrolledStudents.filter(id => id !== studentId) }
+      : s));
+    try {
+      await deleteDoc(doc(db, 'enrollments', `${studentId}_${subjectId}`));
+    } catch (e) {
+      console.error('Failed to delete enrollment doc', e);
+    }
+    try {
+      await updateDoc(doc(db, 'subjects', subjectId), { enrolledStudents: arrayRemove(studentId) });
+    } catch (e) {
+      console.error('Failed to update subject enrollment mirror', e);
+    }
+  }
+
+  /** Notify every enrolled student of a subject (teacher-authored events). */
+  async function fanOutNotifications(params: {
+    subjectId: string;
+    title: string;
+    body: string;
+    type: Notification['type'];
+  }): Promise<void> {
+    try {
+      const uid = currentUser?.id ?? '';
+      const snap = await getDocs(query(
+        collection(db, 'enrollments'),
+        where('subjectId', '==', params.subjectId),
+        where('teacherId', '==', uid),
+      ));
+      const seen = new Set<string>();
+      const senders = snap.docs.map(d => {
+        const studentId = (d.data() as { studentId?: string }).studentId;
+        if (!studentId || studentId === uid || seen.has(studentId)) return Promise.resolve();
+        seen.add(studentId);
+        return setDoc(doc(db, 'notifications', generateId()), {
+          userId: studentId,
+          title: params.title,
+          body: params.body,
+          type: params.type,
+          read: false,
+          createdAt: serverTimestamp(),
+        }).catch(e => console.error('Failed to notify student', studentId, e));
+      });
+      await Promise.all(senders);
+    } catch (e) {
+      console.error('Failed to load subject enrollments for notifications', e);
+    }
   }
 
   async function addAssignment(assignment: Omit<Assignment, 'id' | 'createdAt'>): Promise<void> {
     const newAssignment: Assignment = { ...assignment, id: generateId(), createdAt: new Date().toISOString() };
-    const updated = [...assignments, newAssignment];
-    setAssignments(updated);
-    await persist(STORAGE_KEYS.ASSIGNMENTS, updated);
-    const subject = subjects.find(s => s.id === assignment.subjectId);
-    if (subject) {
-      const newNotifs: Notification[] = subject.enrolledStudents.map(sid => ({
-        id: generateId(),
-        userId: sid,
-        title: 'New Assignment Posted',
-        body: `${assignment.title} has been posted in ${assignment.subjectName}.`,
-        type: 'assignment' as const,
-        read: false,
-        createdAt: new Date().toISOString(),
-      }));
-      const updatedNotifs = [...notifications, ...newNotifs];
-      setNotifications(updatedNotifs);
-      await persist(STORAGE_KEYS.NOTIFICATIONS, updatedNotifs);
-    }
+    await setDoc(doc(db, 'assignments', newAssignment.id), newAssignment);
+    await fanOutNotifications({
+      subjectId: assignment.subjectId,
+      title: 'New Assignment Posted',
+      body: `${assignment.title} has been posted in ${assignment.subjectName}.`,
+      type: 'assignment',
+    });
   }
 
+  /**
+   * The assignment file upload already persisted the Firestore doc (deterministic id);
+   * this mirrors it into local state so the UI updates immediately.
+   */
   async function submitAssignment(submission: Omit<Submission, 'id' | 'submittedAt'>): Promise<void> {
-    const newSub: Submission = { ...submission, id: generateId(), submittedAt: new Date().toISOString() };
-    const updated = [...submissions, newSub];
-    setSubmissions(updated);
-    await persist(STORAGE_KEYS.SUBMISSIONS, updated);
+    const id = `assignment_${submission.assignmentId}_${submission.studentId}`;
+    const newSub: Submission = { ...submission, id, submittedAt: new Date().toISOString() };
+    submissionSourcesRef.current.set(`local:${id}`, [newSub]);
+    recomputeSubmissions();
   }
 
   async function gradeSubmission(submissionId: string, marks: number, feedback: string): Promise<void> {
-    const updated = submissions.map(s =>
-      s.id === submissionId ? { ...s, marks, feedback, gradedAt: new Date().toISOString() } : s
-    );
-    setSubmissions(updated);
-    await persist(STORAGE_KEYS.SUBMISSIONS, updated);
+    const before = submissions;
+    const gradedAt = new Date().toISOString();
+    setSubmissions(prev => prev.map(s =>
+      s.id === submissionId ? { ...s, marks, feedback, gradedAt } : s,
+    ));
+    try {
+      await updateDoc(doc(db, 'submissions', submissionId), {
+        marks,
+        feedback,
+        gradedAt: serverTimestamp(),
+      });
+    } catch (e) {
+      console.error('Failed to save grade to Firestore', e);
+      setSubmissions(before);
+    }
   }
 
   async function addTest(test: Omit<Test, 'id' | 'createdAt'>): Promise<void> {
     const newTest: Test = { ...test, id: generateId(), createdAt: new Date().toISOString() };
-    const updated = [...tests, newTest];
-    setTests(updated);
-    await persist(STORAGE_KEYS.TESTS, updated);
-    const subject = subjects.find(s => s.id === test.subjectId);
-    if (subject) {
-      const newNotifs: Notification[] = subject.enrolledStudents.map(sid => ({
-        id: generateId(),
-        userId: sid,
-        title: 'New Test Scheduled',
-        body: `${test.title} is scheduled in ${test.subjectName}.`,
-        type: 'test' as const,
-        read: false,
-        createdAt: new Date().toISOString(),
-      }));
-      const updatedNotifs = [...notifications, ...newNotifs];
-      setNotifications(updatedNotifs);
-      await persist(STORAGE_KEYS.NOTIFICATIONS, updatedNotifs);
-    }
+    await setDoc(doc(db, 'tests', newTest.id), newTest);
+    await fanOutNotifications({
+      subjectId: test.subjectId,
+      title: 'New Test Scheduled',
+      body: `${test.title} is scheduled in ${test.subjectName}.`,
+      type: 'test',
+    });
   }
 
   async function submitTest(result: Omit<TestResult, 'id' | 'submittedAt'>): Promise<void> {
-    const newResult: TestResult = { ...result, id: generateId(), submittedAt: new Date().toISOString() };
-    const updated = [...testResults, newResult];
-    setTestResults(updated);
-    await persist(STORAGE_KEYS.TEST_RESULTS, updated);
+    if (testResults.some(r => r.testId === result.testId && r.studentId === result.studentId)) {
+      console.warn('Test already submitted; ignoring duplicate submission.');
+      return;
+    }
+    // Deterministic id so resubmission attempts become updates, which students
+    // are not allowed to perform under the security rules.
+    const id = `test_${result.testId}_${result.studentId}`;
+    const payload = {
+      testId: result.testId,
+      studentId: result.studentId,
+      studentName: currentUser?.name ?? '',
+      rollNumber: currentUser?.rollNumber ?? null,
+      subjectId: tests.find(t => t.id === result.testId)?.subjectId ?? null,
+      answers: result.answers,
+      score: result.score,
+      totalMarks: result.totalMarks,
+      submittedAt: serverTimestamp(),
+      marks: null,
+      feedback: null,
+    };
+    try {
+      await setDoc(doc(db, 'submissions', id), payload);
+    } catch (e) {
+      console.error('Failed to submit test to Firestore', e);
+      return;
+    }
+    const local: Submission = {
+      id,
+      testId: result.testId,
+      studentId: result.studentId,
+      studentName: currentUser?.name ?? '',
+      rollNumber: currentUser?.rollNumber ?? undefined,
+      subjectId: tests.find(t => t.id === result.testId)?.subjectId ?? undefined,
+      answers: result.answers,
+      score: result.score,
+      totalMarks: result.totalMarks,
+      submittedAt: new Date().toISOString(),
+      content: '',
+    };
+    submissionSourcesRef.current.set(`local:${id}`, [local]);
+    recomputeSubmissions();
   }
 
   async function addPresentation(presentation: Omit<Presentation, 'id' | 'createdAt'>): Promise<void> {
     const newPres: Presentation = { ...presentation, id: generateId(), createdAt: new Date().toISOString() };
-    const updated = [...presentations, newPres];
-    setPresentations(updated);
-    await persist(STORAGE_KEYS.PRESENTATIONS, updated);
+    await setDoc(doc(db, 'presentations', newPres.id), newPres);
   }
 
   async function addPresentationMark(mark: Omit<PresentationMark, 'id'>): Promise<void> {
-    const existing = presentationMarks.find(m => m.presentationId === mark.presentationId && m.studentId === mark.studentId);
-    let updated: PresentationMark[];
-    if (existing) {
-      updated = presentationMarks.map(m => m.id === existing.id ? { ...m, ...mark } : m);
-    } else {
-      updated = [...presentationMarks, { ...mark, id: generateId() }];
-    }
-    setPresentationMarks(updated);
-    await persist(STORAGE_KEYS.PRESENTATION_MARKS, updated);
+    const id = `${mark.presentationId}_${mark.studentId}`;
+    await setDoc(doc(db, 'presentationMarks', id), {
+      presentationId: mark.presentationId,
+      studentId: mark.studentId,
+      marks: mark.marks,
+      totalMarks: mark.totalMarks,
+      feedback: mark.feedback ?? null,
+    });
   }
 
   async function addAnnouncement(announcement: Omit<Announcement, 'id' | 'createdAt'>): Promise<void> {
     const newAnn: Announcement = { ...announcement, id: generateId(), createdAt: new Date().toISOString() };
-    const updated = [...announcements, newAnn];
-    setAnnouncements(updated);
-    await persist(STORAGE_KEYS.ANNOUNCEMENTS, updated);
+    await setDoc(doc(db, 'announcements', newAnn.id), newAnn);
   }
 
   async function markNotificationRead(notificationId: string): Promise<void> {
-    const updated = notifications.map(n => n.id === notificationId ? { ...n, read: true } : n);
-    setNotifications(updated);
-    await persist(STORAGE_KEYS.NOTIFICATIONS, updated);
+    setNotifications(prev => prev.map(n => n.id === notificationId ? { ...n, read: true } : n));
+    try {
+      await updateDoc(doc(db, 'notifications', notificationId), { read: true });
+    } catch (e) {
+      console.error('Failed to mark notification read', e);
+    }
   }
 
   async function addNotification(notification: Omit<Notification, 'id' | 'createdAt'>): Promise<void> {
-    const newNotif: Notification = { ...notification, id: generateId(), createdAt: new Date().toISOString() };
-    const updated = [...notifications, newNotif];
-    setNotifications(updated);
-    await persist(STORAGE_KEYS.NOTIFICATIONS, updated);
+    await setDoc(doc(db, 'notifications', generateId()), {
+      ...notification,
+      createdAt: new Date().toISOString(),
+    });
   }
 
   async function approveUser(userId: string): Promise<void> {
-    const updated = users.map(u => u.id === userId ? { ...u, isApproved: true } : u);
-    setUsers(updated);
-    await persist(STORAGE_KEYS.USERS, updated);
+    setUsers(prev => prev.map(u => u.id === userId ? { ...u, isApproved: true } : u));
+    await updateDoc(doc(db, 'users', userId), { isApproved: true });
   }
 
   async function updateUser(userId: string, updates: Partial<User>): Promise<void> {
-    const updated = users.map(u => u.id === userId ? { ...u, ...updates } : u);
-    setUsers(updated);
-    await persist(STORAGE_KEYS.USERS, updated);
-    if (currentUser?.id === userId) {
-      const updatedUser = { ...currentUser, ...updates };
-      setCurrentUser(updatedUser);
-      await AsyncStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(updatedUser));
+    const before = users;
+    setUsers(prev => prev.map(u => u.id === userId ? { ...u, ...updates } : u));
+
+    const { password: _p, ...safeUpdates } = updates as Partial<User> & { password?: string };
+    // Firestore does not allow `undefined` values in updateDoc payloads.
+    const sanitized: Record<string, unknown> = { ...safeUpdates };
+    Object.keys(sanitized).forEach(k => {
+      if (sanitized[k] === undefined) delete sanitized[k];
+    });
+    try {
+      await updateDoc(doc(db, 'users', userId), sanitized);
+    } catch (e) {
+      console.error('Failed to update user in Firestore', e);
+      setUsers(before);
+      throw e;
+    }
+
+    if (currentUserRef.current?.id === userId) {
+      setCurrentUser(prev => {
+        const updatedUser = { ...(prev as User), ...updates };
+        AsyncStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(updatedUser)).catch(() => {});
+        return updatedUser;
+      });
     }
   }
 
   async function deleteUser(userId: string): Promise<void> {
-    const updated = users.filter(u => u.id !== userId);
-    setUsers(updated);
-    await persist(STORAGE_KEYS.USERS, updated);
+    const before = users;
+    setUsers(prev => prev.filter(u => u.id !== userId));
+    try {
+      await deleteDoc(doc(db, 'users', userId));
+    } catch (e) {
+      console.error('Failed to delete user in Firestore', e);
+      setUsers(before);
+      throw e;
+    }
   }
 
   function getStudentMarks(studentId: string, subjectId: string) {
@@ -671,7 +979,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const value = useMemo(() => ({
     currentUser, users, subjects, assignments, submissions, tests, testResults,
     presentations, presentationMarks, notifications, announcements, isLoading,
-    login, register, logout, addSubject, enrollInSubject, unenrollFromSubject,
+    getProfileByUid, registerProfile, logout, addSubject, enrollInSubject, unenrollFromSubject,
     addAssignment, submitAssignment, gradeSubmission, addTest, submitTest,
     addPresentation, addPresentationMark, addAnnouncement, markNotificationRead,
     addNotification, approveUser, updateUser, deleteUser, getStudentMarks, getUnreadCount,

@@ -1,0 +1,336 @@
+rules_version = '2';
+
+// ============================================================
+// UniTrack Firestore Security Rules
+// ------------------------------------------------------------
+// Model (verified from the app code, not assumed):
+//   users/{uid}                    role in ['student','cr','teacher','admin']
+//   subjects/{id}                  teacherId owns; enrolledStudents[] mirror
+//   assignments/{id}               teacherId owns
+//   tests/{id}                     teacherId owns (questions + answers)
+//   presentations/{id}             teacherId owns
+//   submissions/{id}               student work (assignment file OR test answers),
+//                                  graded by the owning teacher
+//   enrollmentRequests/{stu_sub}   student asks, subject teacher decides
+//   enrollments/{stu_sub}          active membership (teacher/admin managed)
+//   teacherRequests/{uid}          teacher signup approval (admin decides)
+//   notifications/{id}             per-user inbox
+//   announcements/{id}             staff-authored class announcements
+//   presentationMarks/{id}         teacher grades presentation per student
+//
+// Privileged actions are enforced server-side via the caller's role stored in
+// users/{uid}; get()/exists() inside rules are evaluated with admin privileges,
+// so students cannot fake their role, approve themselves, or edit records
+// they do not own. Default posture: DENY (no permissive catch-all).
+// ============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- helpers ----------
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isSelf(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // Role is read from the trusted users/{uid} document. exists() avoids
+    // errors while the profile is still being created at signup.
+    function userRoleOf(uid) {
+      return exists(/databases/$(database)/documents/users/$(uid))
+        ? get(/databases/$(database)/documents/users/$(uid)).data.role
+        : '';
+    }
+
+    function currentRole() {
+      return isSignedIn() ? userRoleOf(request.auth.uid) : '';
+    }
+
+    function isAdmin() {
+      return isVerified() && currentRole() == 'admin';
+    }
+
+    function isTeacher() {
+      return isVerified() && currentRole() == 'teacher';
+    }
+
+    function isCR() {
+      return isVerified() && currentRole() == 'cr';
+    }
+
+    // Staff = teacher, CR or admin. Used for announcements and notifications.
+    function isStaff() {
+      return isVerified()
+        && (currentRole() == 'teacher' || currentRole() == 'cr' || currentRole() == 'admin');
+    }
+
+    // ---------- users ----------
+
+    match /users/{userId} {
+      // Self-read (after verification); teachers need names/roll numbers for
+      // grading screens; admins manage accounts.
+      allow read: if isVerified() && (isSelf(userId) || isTeacher() || isAdmin());
+
+      // Signup creates the caller's own profile. Role is whitelisted (never
+      // 'admin'), teachers must start unapproved, and no password is ever stored.
+      allow create: if isSelf(userId)
+        && request.resource.data.keys().hasAll(['name', 'email', 'role'])
+        && request.resource.data.name is string
+        && request.resource.data.email is string
+        && request.resource.data.role in ['student', 'cr', 'teacher']
+        && !request.resource.data.keys().hasAny(['password'])
+        && (request.resource.data.role == 'teacher'
+            ? request.resource.data.isApproved == false
+            : true);
+
+      // Self-update is allowed (name, phone, bio, photoURL, ...) but can never
+      // change role, approval state, or email. Admins may manage fully.
+      allow update: if isAdmin()
+        || (isVerified() && isSelf(userId)
+            && !request.resource.data.keys().hasAny(['password'])
+            && request.resource.data.role == resource.data.role
+            && request.resource.data.isApproved == resource.data.isApproved
+            && request.resource.data.email == resource.data.email);
+
+      allow delete: if isAdmin();
+    }
+
+    // ---------- teacher registration requests ----------
+
+    match /teacherRequests/{teacherId} {
+      allow read: if isVerified() && (isSelf(teacherId) || isAdmin());
+
+      // Created during signup (pre-verification is fine); must be pending.
+      allow create: if isSelf(teacherId)
+        && request.resource.data.teacherId == teacherId
+        && request.resource.data.status == 'pending'
+        && request.resource.data.type == 'teacher';
+
+      // Only admins decide on requests. A teacher cannot self-approve.
+      allow update, delete: if isAdmin();
+    }
+
+    // ---------- subjects ----------
+
+    match /subjects/{subjectId} {
+      allow read: if isVerified();
+
+      allow create: if isVerified()
+        && (isAdmin() || (isTeacher() && request.resource.data.teacherId == request.auth.uid));
+
+      // Admin: full control. Owning teacher: any field except teacherId (frozen).
+      // Any verified user may remove ONLY themselves from enrolledStudents (drop),
+      // changing nothing else: affectedKeys() must be exactly ['enrolledStudents']
+      // and the new array must equal the old one with the caller removed.
+      allow update: if isVerified()
+        && (isAdmin()
+            || (isTeacher()
+                && resource.data.teacherId == request.auth.uid
+                && request.resource.data.teacherId == resource.data.teacherId)
+            || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['enrolledStudents'])
+                && request.resource.data.enrolledStudents == resource.data.enrolledStudents.removeAll([request.auth.uid])));
+
+      allow delete: if isVerified()
+        && (isAdmin() || (isTeacher() && resource.data.teacherId == request.auth.uid));
+    }
+
+    // ---------- assignments ----------
+
+    match /assignments/{assignmentId} {
+      allow read: if isVerified();
+      allow create: if isVerified()
+        && (isAdmin() || (isTeacher() && request.resource.data.teacherId == request.auth.uid));
+      allow update, delete: if isVerified()
+        && (isAdmin() || (isTeacher() && resource.data.teacherId == request.auth.uid));
+    }
+
+    // ---------- tests ----------
+
+    // NOTE (documented limitation): students must read the tests collection to
+    // take tests, and correctIndex ships in the document. Auto-scoring is
+    // advisory; teachers re-grade test submissions. A future hardening step is
+    // moving the answer key to a teacher-only document or scoring in a Cloud
+    // Function.
+    match /tests/{testId} {
+      allow read: if isVerified();
+      allow create: if isVerified()
+        && (isAdmin() || (isTeacher() && request.resource.data.teacherId == request.auth.uid));
+      allow update, delete: if isVerified()
+        && (isAdmin() || (isTeacher() && resource.data.teacherId == request.auth.uid));
+    }
+
+    // ---------- presentations ----------
+
+    match /presentations/{presentationId} {
+      allow read: if isVerified();
+      allow create: if isVerified()
+        && (isAdmin() || (isTeacher() && request.resource.data.teacherId == request.auth.uid));
+      allow update, delete: if isVerified()
+        && (isAdmin() || (isTeacher() && resource.data.teacherId == request.auth.uid));
+    }
+
+    // ---------- submissions (assignment files + test submissions) ----------
+
+    match /submissions/{submissionId} {
+      function isAssignmentOwner() {
+        return resource.data.get('assignmentId', '') != ''
+          && exists(/databases/$(database)/documents/assignments/$(resource.data.get('assignmentId', '')))
+          && get(/databases/$(database)/documents/assignments/$(resource.data.get('assignmentId', ''))).data.teacherId == request.auth.uid;
+      }
+
+      function isTestOwner() {
+        return resource.data.get('testId', '') != ''
+          && exists(/databases/$(database)/documents/tests/$(resource.data.get('testId', '')))
+          && get(/databases/$(database)/documents/tests/$(resource.data.get('testId', ''))).data.teacherId == request.auth.uid;
+      }
+
+      // Students may submit only their own work. Document IDs are deterministic
+      // on the client (assignment_..., test_...), so a second create on the same
+      // key is an update, which students are not allowed to do.
+      allow create: if isVerified()
+        && request.resource.data.studentId == request.auth.uid
+        && request.resource.data.keys().hasAny(['assignmentId', 'testId']);
+
+      allow read: if isVerified() && (
+        resource.data.studentId == request.auth.uid
+        || isAdmin()
+        || (isTeacher() && (isAssignmentOwner() || isTestOwner()))
+      );
+
+      // Grading: own teacher (or admin) only; identity/content fields frozen.
+      allow update: if isVerified()
+        && (isAdmin() || (isTeacher() && (isAssignmentOwner() || isTestOwner())))
+        && request.resource.data.studentId == resource.data.studentId
+        && request.resource.data.get('assignmentId', null) == resource.data.get('assignmentId', null)
+        && request.resource.data.get('testId', null) == resource.data.get('testId', null)
+        && request.resource.data.get('answers', null) == resource.data.get('answers', null)
+        && request.resource.data.get('fileUrl', null) == resource.data.get('fileUrl', null);
+
+      allow delete: if isAdmin();
+    }
+
+    // ---------- enrollment requests ----------
+
+    match /enrollmentRequests/{requestId} {
+      allow read: if isVerified() && (
+        resource.data.studentId == request.auth.uid
+        || resource.data.teacherId == request.auth.uid
+        || isAdmin()
+      );
+
+      allow create: if isVerified()
+        && request.resource.data.studentId == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.studentName is string
+        && request.resource.data.teacherId is string;
+
+      // The subject teacher approves/rejects; a student may only reset a
+      // previously rejected request back to pending; admins may do anything.
+      allow update: if isVerified() && (
+        isAdmin()
+        || (request.auth.uid == resource.data.teacherId
+            && request.resource.data.status in ['approved', 'rejected']
+            && request.resource.data.studentId == resource.data.studentId
+            && request.resource.data.subjectId == resource.data.subjectId
+            && request.resource.data.teacherId == resource.data.teacherId)
+        || (request.auth.uid == resource.data.studentId
+            && resource.data.status == 'rejected'
+            && request.resource.data.status == 'pending'
+            && request.resource.data.teacherId == resource.data.teacherId
+            && request.resource.data.subjectId == resource.data.subjectId)
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // ---------- enrollments ----------
+
+    match /enrollments/{enrollmentId} {
+      allow read: if isVerified() && (
+        resource.data.studentId == request.auth.uid
+        || resource.data.teacherId == request.auth.uid
+        || isAdmin()
+      );
+
+      allow create: if isVerified()
+        && (isAdmin() || (isTeacher() && request.resource.data.teacherId == request.auth.uid));
+
+      allow update: if isVerified()
+        && (isAdmin() || (isTeacher() && resource.data.teacherId == request.auth.uid));
+
+      // Students may drop themselves; the owning teacher or admin may remove.
+      allow delete: if isVerified() && (
+        isAdmin()
+        || resource.data.studentId == request.auth.uid
+        || (isTeacher() && resource.data.teacherId == request.auth.uid)
+      );
+    }
+
+    // ---------- notifications (per-user inbox) ----------
+
+    match /notifications/{notificationId} {
+      allow read: if isVerified() && resource.data.userId == request.auth.uid;
+
+      // Staff may notify any user; everyone may write only to their own inbox.
+      allow create: if isVerified()
+        && request.resource.data.userId is string
+        && request.resource.data.title is string
+        && request.resource.data.body is string
+        && (isStaff() || request.resource.data.userId == request.auth.uid);
+
+      allow update: if isVerified() && resource.data.userId == request.auth.uid;
+
+      allow delete: if isAdmin()
+        || (isVerified() && resource.data.userId == request.auth.uid);
+    }
+
+    // ---------- announcements ----------
+
+    match /announcements/{announcementId} {
+      allow read: if isVerified();
+      allow create: if isStaff() && request.resource.data.crId == request.auth.uid;
+      allow update, delete: if isAdmin()
+        || (isStaff() && resource.data.crId == request.auth.uid);
+    }
+
+    // ---------- presentation marks ----------
+
+    match /presentationMarks/{markId} {
+      function isPresentationOwner() {
+        return resource.data.get('presentationId', '') != ''
+          && exists(/databases/$(database)/documents/presentations/$(resource.data.get('presentationId', '')))
+          && get(/databases/$(database)/documents/presentations/$(resource.data.get('presentationId', ''))).data.teacherId == request.auth.uid;
+      }
+
+      function ownsTargetPresentation() {
+        return request.resource.data.get('presentationId', '') != ''
+          && exists(/databases/$(database)/documents/presentations/$(request.resource.data.get('presentationId', '')))
+          && get(/databases/$(database)/documents/presentations/$(request.resource.data.get('presentationId', ''))).data.teacherId == request.auth.uid;
+      }
+
+      allow read: if isVerified() && (
+        resource.data.studentId == request.auth.uid
+        || isAdmin()
+        || (isTeacher() && isPresentationOwner())
+      );
+
+      allow create: if isVerified()
+        && (isAdmin() || (isTeacher() && ownsTargetPresentation()))
+        && request.resource.data.studentId is string
+        && request.resource.data.marks is number;
+
+      allow update: if isVerified() && (isAdmin() || (isTeacher() && isPresentationOwner()));
+
+      allow delete: if isAdmin();
+    }
+
+    // Everything not matched above is denied by default.
+  }
+}

@@ -1,0 +1,41 @@
+rules_version = '2';
+
+// UniTrack Firebase Storage Security Rules
+// Buckets used by the app:
+//   - profilePictures/{uid}.jpg   (profile photos, owner-only writes)
+//   - assignments/{subjectId}/{assignmentId}/{studentId}-{ts}-{name}  (student uploads)
+// Default posture: deny anything not explicitly allowed.
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Profile pictures: any signed-in user can view; only the owner can write,
+    // images only, max 5 MB.
+    match /profilePictures/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn()
+        && fileName.matches('^' + request.auth.uid + '\\.jpg$')
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    // Assignment uploads: filename must start with the uploader's uid
+    // (client pattern: `${studentId}-${Date.now()}-${fileName}`), max 10 MB.
+    // Any signed-in user can read so teachers can download submissions.
+    match /assignments/{subjectId}/{assignmentId}/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn()
+        && fileName.matches('^' + request.auth.uid + '-[0-9]+-.*')
+        && request.resource.size < 10 * 1024 * 1024;
+    }
+
+    // Deny everything else.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

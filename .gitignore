@@ -32,10 +32,23 @@ yarn-error.*
 *.pem
 
 # local env files
+.env
 .env*.local
+
+# Firebase emulator debug logs
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+
+# server bundle output (esbuild) and expo static export
+server_dist/
+static-build/
 
 # typescript
 *.tsbuildinfo
 .vercel
 
 .env
+
+.env.*
+!.env.example

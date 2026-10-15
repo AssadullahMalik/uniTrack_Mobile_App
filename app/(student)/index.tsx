@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, Pressable, Modal,
-  TextInput, Platform,
+  Platform,
 } from 'react-native';
 import { router } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -28,7 +28,7 @@ function formatDateShort(dateStr: string) {
 }
 
 export default function StudentHome() {
-  const { currentUser, subjects, assignments, tests, presentations, submissions, logout, enrollInSubject, unenrollFromSubject } = useApp();
+  const { currentUser, subjects, assignments, tests, presentations, submissions, logout } = useApp();
   const insets = useSafeAreaInsets();
   const [showProfileModal, setShowProfileModal] = useState(false);
 
@@ -204,7 +204,11 @@ export default function StudentHome() {
               {currentUser?.rollNumber && <View style={styles.profileRow}><Feather name="hash" size={16} color={Colors.textSecondary} /><Text style={styles.profileRowText}>Roll No: {currentUser.rollNumber}</Text></View>}
               {currentUser?.semester && <View style={styles.profileRow}><Feather name="layers" size={16} color={Colors.textSecondary} /><Text style={styles.profileRowText}>Semester {currentUser.semester}</Text></View>}
             </View>
-            <Pressable style={styles.logoutBtn} onPress={handleLogout}>
+            <Pressable style={styles.logoutBtn} onPress={() => { setShowProfileModal(false); router.push('/profile'); }}>
+              <Feather name="user" size={18} color={Colors.student} />
+              <Text style={styles.logoutText}>Edit Profile</Text>
+            </Pressable>
+            <Pressable style={[styles.logoutBtn, { marginTop: 8 }]} onPress={handleLogout}>
               <Feather name="log-out" size={18} color={Colors.error} />
               <Text style={styles.logoutText}>Logout</Text>
             </Pressable>

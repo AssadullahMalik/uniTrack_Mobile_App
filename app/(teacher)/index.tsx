@@ -11,7 +11,7 @@ import { Badge } from '@/components/ui/Badge';
 import * as Haptics from 'expo-haptics';
 
 export default function TeacherDashboard() {
-  const { currentUser, subjects, assignments, submissions, tests, presentations, users, logout } = useApp();
+  const { currentUser, subjects, assignments, submissions, tests, presentations, logout } = useApp();
   const insets = useSafeAreaInsets();
   const [showProfile, setShowProfile] = useState(false);
   const webTop = Platform.OS === 'web' ? 67 : 0;
@@ -62,7 +62,7 @@ export default function TeacherDashboard() {
               { icon: 'book', label: 'Subjects', route: '/(teacher)/subjects', color: Colors.teacher },
               { icon: 'file-text', label: 'Assignments', route: '/(teacher)/assignments', color: Colors.student },
               { icon: 'edit-3', label: 'Tests', route: '/(teacher)/tests', color: Colors.success },
-              { icon: 'monitor', label: 'Presentations', route: '/(teacher)/tests', color: Colors.accent },
+              { icon: 'users', label: 'Enroll Requests', route: '/(teacher)/enrollments', color: Colors.teacher },
             ].map(action => (
               <Pressable key={action.label} style={styles.actionCard} onPress={() => router.push(action.route as any)}>
                 <View style={[styles.actionIcon, { backgroundColor: action.color + '15' }]}>
@@ -156,7 +156,11 @@ export default function TeacherDashboard() {
               <Text style={styles.profileEmail}>{currentUser?.email}</Text>
               <Badge label="Teacher" variant="teacher" />
             </View>
-            <Pressable style={styles.logoutBtn} onPress={handleLogout}>
+            <Pressable style={styles.logoutBtn} onPress={() => { setShowProfile(false); router.push('/profile'); }}>
+              <Feather name="user" size={18} color={Colors.teacher} />
+              <Text style={styles.logoutText}>Edit Profile</Text>
+            </Pressable>
+            <Pressable style={[styles.logoutBtn, { marginTop: 8 }]} onPress={handleLogout}>
               <Feather name="log-out" size={18} color={Colors.error} />
               <Text style={styles.logoutText}>Logout</Text>
             </Pressable>

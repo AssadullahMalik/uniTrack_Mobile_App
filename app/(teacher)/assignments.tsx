@@ -24,28 +24,43 @@ export default function TeacherAssignments() {
   const [gradeFeedback, setGradeFeedback] = useState('');
   const [creating, setCreating] = useState(false);
   const [grading, setGrading] = useState(false);
+  const [createError, setCreateError] = useState('');
   const webTop = Platform.OS === 'web' ? 67 : 0;
 
   const mySubjects = subjects.filter(s => s.teacherId === currentUser?.id);
   const myAssignments = assignments.filter(a => a.teacherId === currentUser?.id);
 
   const handleCreate = async () => {
-    if (!currentUser || !title.trim() || !subjectId || !deadline.trim()) return;
+    if (!currentUser) return;
+    setCreateError('');
+    if (mySubjects.length === 0) {
+      setCreateError('Create a subject first from the Subjects tab.');
+      return;
+    }
+    if (!title.trim() || !subjectId || !deadline.trim()) {
+      setCreateError('Please fill title, subject, and deadline.');
+      return;
+    }
     setCreating(true);
-    const sub = mySubjects.find(s => s.id === subjectId);
-    await addAssignment({
-      subjectId,
-      subjectName: sub?.name ?? '',
-      teacherId: currentUser.id,
-      title: title.trim(),
-      description: description.trim(),
-      deadline: new Date(deadline).toISOString(),
-      totalMarks: parseInt(totalMarks) || 20,
-    });
-    setCreating(false);
-    setShowCreate(false);
-    setTitle(''); setDescription(''); setDeadline(''); setTotalMarks('20'); setSubjectId('');
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    try {
+      const sub = mySubjects.find(s => s.id === subjectId);
+      await addAssignment({
+        subjectId,
+        subjectName: sub?.name ?? '',
+        teacherId: currentUser.id,
+        title: title.trim(),
+        description: description.trim(),
+        deadline: new Date(deadline).toISOString(),
+        totalMarks: parseInt(totalMarks) || 20,
+      });
+      setShowCreate(false);
+      setTitle(''); setDescription(''); setDeadline(''); setTotalMarks('20'); setSubjectId('');
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (err: any) {
+      setCreateError(err?.message || 'Failed to create assignment. Please try again.');
+    } finally {
+      setCreating(false);
+    }
   };
 
   const handleGrade = async () => {
@@ -156,21 +171,30 @@ export default function TeacherAssignments() {
 
       {/* Create Assignment Modal */}
       <Modal visible={showCreate} transparent animationType="slide">
-        <Pressable style={styles.overlay} onPress={() => setShowCreate(false)}>
+        <Pressable style={styles.overlay} onPress={() => { setShowCreate(false); setCreateError(''); }}>
           <View style={[styles.createSheet, { paddingBottom: insets.bottom + 24 }]}>
             <View style={styles.sheetHandle} />
             <Text style={styles.sheetTitle}>Create Assignment</Text>
+            {createError ? (
+              <View style={styles.createErrorBox}>
+                <Text style={styles.createErrorText}>{createError}</Text>
+              </View>
+            ) : null}
             <View style={styles.inputGroup}>
               <Text style={styles.label}>Subject *</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 0 }}>
-                <View style={{ flexDirection: 'row', gap: 8 }}>
-                  {mySubjects.map(s => (
-                    <Pressable key={s.id} style={[styles.subjectChip, subjectId === s.id && styles.subjectChipActive]} onPress={() => setSubjectId(s.id)}>
-                      <Text style={[styles.subjectChipText, subjectId === s.id && { color: '#FFFFFF' }]}>{s.name}</Text>
-                    </Pressable>
-                  ))}
-                </View>
-              </ScrollView>
+              {mySubjects.length === 0 ? (
+                <Text style={styles.noSubjectsHint}>Create a subject first from the Subjects tab.</Text>
+              ) : (
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 0 }}>
+                  <View style={{ flexDirection: 'row', gap: 8 }}>
+                    {mySubjects.map(s => (
+                      <Pressable key={s.id} style={[styles.subjectChip, subjectId === s.id && styles.subjectChipActive]} onPress={() => setSubjectId(s.id)}>
+                        <Text style={[styles.subjectChipText, subjectId === s.id && { color: '#FFFFFF' }]}>{s.name}</Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                </ScrollView>
+              )}
             </View>
             <View style={styles.inputGroup}>
               <Text style={styles.label}>Title *</Text>
@@ -190,7 +214,13 @@ export default function TeacherAssignments() {
                 <TextInput style={styles.input} placeholder="20" placeholderTextColor={Colors.textMuted} value={totalMarks} onChangeText={setTotalMarks} keyboardType="number-pad" />
               </View>
             </View>
-            <Button label="Create Assignment" onPress={handleCreate} loading={creating} fullWidth />
+            <Button
+              label="Create Assignment"
+              onPress={handleCreate}
+              loading={creating}
+              fullWidth
+              disabled={mySubjects.length === 0}
+            />
           </View>
         </Pressable>
       </Modal>
@@ -267,4 +297,7 @@ const styles = StyleSheet.create({
   subjectChipText: { fontSize: 13, fontFamily: 'Poppins_600SemiBold', color: Colors.textSecondary },
   emptySmall: { alignItems: 'center', padding: 24 },
   emptySmallText: { fontSize: 14, fontFamily: 'Poppins_400Regular', color: Colors.textMuted },
+  createErrorBox: { backgroundColor: '#FEE2E2', borderRadius: 8, padding: 10, marginBottom: 8 },
+  createErrorText: { fontSize: 13, fontFamily: 'Poppins_400Regular', color: Colors.error },
+  noSubjectsHint: { fontSize: 13, fontFamily: 'Poppins_400Regular', color: Colors.textMuted, marginBottom: 8 },
 });

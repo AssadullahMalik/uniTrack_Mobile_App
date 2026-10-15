@@ -18,7 +18,7 @@ function NativeCRTabs() {
         <Label>Announce</Label>
       </NativeTabs.Trigger>
       <NativeTabs.Trigger name="schedule">
-        <Icon sf={{ default: "calendar", selected: "calendar.fill" }} />
+        <Icon sf={{ default: "calendar", selected: "calendar" }} />
         <Label>Schedule</Label>
       </NativeTabs.Trigger>
     </NativeTabs>

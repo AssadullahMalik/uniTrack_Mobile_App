@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, Pressable, Modal, Platform, Alert,
+  View, Text, StyleSheet, ScrollView, Pressable, Modal, Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
@@ -33,14 +33,19 @@ export default function StudentTests() {
 
   const test = activeTest ? tests.find(t => t.id === activeTest) : null;
 
+  // Intentionally keyed on activeTest only: `test` is derived from the tests
+  // collection, so listing it would reset in-progress answers on any snapshot.
   useEffect(() => {
     if (test && activeTest) {
       setAnswers(new Array(test.questions.length).fill(-1));
       setCurrentQ(0);
       setTimeLeft(test.duration * 60);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTest]);
 
+  // Intentionally keyed on activeTest only: depending on timeLeft would tear
+  // down and recreate the interval every second; handleSubmit is stable here.
   useEffect(() => {
     if (activeTest && timeLeft > 0) {
       timerRef.current = setInterval(() => {
@@ -55,6 +60,7 @@ export default function StudentTests() {
       }, 1000);
     }
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTest]);
 
   const handleSubmit = async (auto = false) => {
@@ -223,7 +229,7 @@ export default function StudentTests() {
                     <Feather name="arrow-right" size={18} color="#FFFFFF" />
                   </Pressable>
                 ) : (
-                  <Pressable style={[styles.navBtn, styles.navBtnSuccess]} onPress={() => handleSubmit(false)}>
+                  <Pressable style={[styles.navBtn, styles.navBtnSuccess]} onPress={() => handleSubmit(false)} disabled={submitting}>
                     <Text style={[styles.navBtnText, { color: '#FFFFFF' }]}>Submit</Text>
                     <Feather name="check" size={18} color="#FFFFFF" />
                   </Pressable>

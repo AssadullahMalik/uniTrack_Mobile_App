@@ -3,6 +3,8 @@ import {
   View, Text, TextInput, StyleSheet, ScrollView, Pressable,
   KeyboardAvoidingView, Platform, StatusBar,
 } from 'react-native';
+import { createUserWithEmailAndPassword, sendEmailVerification, signOut } from 'firebase/auth';
+import { auth } from '@/firebaseConfig';
 import { router } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -12,6 +14,7 @@ import { Colors } from '@/constants/colors';
 import { Button } from '@/components/ui/Button';
 import type { UserRole } from '@/context/AppContext';
 import * as Haptics from 'expo-haptics';
+import { createTeacherRequest } from '@/src/services/teacherRequests';
 
 const ROLES: { value: UserRole; label: string; desc: string; color: string }[] = [
   { value: 'student', label: 'Student', desc: 'View courses, submit work, take tests', color: Colors.student },
@@ -22,7 +25,7 @@ const ROLES: { value: UserRole; label: string; desc: string; color: string }[] =
 const DEPARTMENTS = ['Computer Science', 'Electrical Engineering', 'Mechanical Engineering', 'Civil Engineering', 'Software Engineering'];
 
 export default function RegisterScreen() {
-  const { register } = useApp();
+  const { registerProfile } = useApp();
   const insets = useSafeAreaInsets();
   const [selectedRole, setSelectedRole] = useState<UserRole>('student');
   const [name, setName] = useState('');
@@ -40,34 +43,66 @@ export default function RegisterScreen() {
       setError('Please fill all required fields');
       return;
     }
+
     if (password.length < 6) {
       setError('Password must be at least 6 characters');
       return;
     }
+
     setLoading(true);
     setError('');
-    const success = await register({
-      name: name.trim(),
-      email: email.trim(),
-      password,
-      role: selectedRole,
-      department,
-      rollNumber: rollNumber.trim(),
-      semester: semester.trim(),
-      isApproved: selectedRole === 'student' || selectedRole === 'cr',
-    });
-    setLoading(false);
-    if (!success) {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      setError('Email already registered');
-      return;
-    }
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    if (selectedRole === 'teacher') {
+
+    try {
+      // 1) Create Firebase Auth account
+      const userCredential = await createUserWithEmailAndPassword(auth, email.trim().toLowerCase(), password);
+      const uid = userCredential.user.uid;
+
+      // 2) Send verification email
+      await sendEmailVerification(userCredential.user);
+
+      // 3) Always create Firestore profile after auth creation (no password)
+      try {
+        await registerProfile(
+          {
+            name: name.trim(),
+            email: email.trim().toLowerCase(),
+            role: selectedRole,
+            department,
+            rollNumber: rollNumber.trim() || undefined,
+            semester: semester.trim() || undefined,
+            isApproved: selectedRole === 'teacher' ? false : true,
+          },
+          uid,
+        );
+        // If this is a teacher, also create a teacherRequests entry for admin approval
+        if (selectedRole === 'teacher') {
+          await createTeacherRequest({
+            teacherId: uid,
+            name: name.trim(),
+            email: email.trim().toLowerCase(),
+          });
+        }
+      } catch (profileErr) {
+        console.warn('Firestore profile create failed; login will self-heal.', profileErr);
+        // Auth user exists; sign out. Login flow will create profile if missing.
+      }
+
+      // 4) Sign out so they must verify email before logging in
+      await signOut(auth);
+
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       setError('');
+      alert('Please verify your email before logging in.');
       router.replace('/(auth)/login');
-    } else {
-      router.replace('/(auth)/login');
+    } catch (err: any) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      if (err?.code === 'auth/email-already-in-use') {
+        setError('This email is already registered. Please sign in or use Forgot Password.');
+      } else {
+        setError(err?.message ?? 'Registration failed.');
+      }
+    } finally {
+      setLoading(false);
     }
   };
 

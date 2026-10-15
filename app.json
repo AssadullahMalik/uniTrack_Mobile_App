@@ -2,7 +2,7 @@
   "expo": {
     "name": "UniTrack",
     "slug": "unitrack",
-    "version": "1.0.0",
+    "version": "1.0.2",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "unitrack",
@@ -19,6 +19,7 @@
     },
     "android": {
       "package": "com.unitrack",
+      "versionCode": 3,
       "adaptiveIcon": {
         "backgroundColor": "#0F1E3C",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -42,6 +43,14 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {
+        "origin": "https://replit.com/"
+      },
+      "eas": {
+        "projectId": "349561ef-b18c-4c4f-857d-69a1d26bca0d"
+      }
     }
   }
 }
